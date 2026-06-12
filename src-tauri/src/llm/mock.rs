@@ -32,7 +32,7 @@ impl MockReplyGeneration {
         } = request;
 
         let summary = transcript
-            .split(' ')
+            .split_ascii_whitespace()
             .take(3)
             .collect::<Vec<_>>()
             .join(" ");

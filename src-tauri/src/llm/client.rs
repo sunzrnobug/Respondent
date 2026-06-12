@@ -45,6 +45,7 @@ pub enum LlmError {
 }
 
 /// One pull from a `ReplyGeneration`.
+#[derive(Debug)]
 pub enum ReplyPoll {
     Event(ReplyEvent),
     /// No event yet, but generation is still in progress (real adapters that

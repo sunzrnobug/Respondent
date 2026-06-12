@@ -114,7 +114,14 @@ fn mock_reply_streams_started_tokens_final_then_done() {
         }
         other => panic!("expected started, got {other:?}"),
     }
-    assert!(events.iter().any(|event| matches!(event, ReplyEvent::Token { .. })));
+    let token_texts: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            ReplyEvent::Token { token, .. } => Some(token.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(token_texts, ["Acknowledged: ", "could you summarize"]);
     match events.last() {
         Some(ReplyEvent::Final { generation_id, text, .. }) => {
             assert_eq!(generation_id.as_str(), "gen-1");
@@ -122,4 +129,5 @@ fn mock_reply_streams_started_tokens_final_then_done() {
         }
         other => panic!("expected final, got {other:?}"),
     }
+    assert!(matches!(generation.poll(), ReplyPoll::Done), "poll after done is stable");
 }
