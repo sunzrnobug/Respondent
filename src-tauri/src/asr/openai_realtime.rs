@@ -145,11 +145,7 @@ impl StreamingAsrClient for OpenAiRealtimeAsrClient {
         "openai-realtime-asr"
     }
 
-    fn push_frame(&mut self, frame: &AudioFrame) -> Result<(), AsrError> {
-        if self.utterance_started_at_ms.is_none() {
-            self.utterance_started_at_ms = Some(frame.captured_at_ms as i64);
-        }
-        self.last_frame_ended_at_ms = frame.captured_at_ms as i64 + frame.duration_ms() as i64;
+    fn push_frame(&mut self, _frame: &AudioFrame) -> Result<(), AsrError> {
         self.drain_provider_events()
     }
 
