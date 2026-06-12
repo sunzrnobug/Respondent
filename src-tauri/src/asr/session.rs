@@ -88,7 +88,8 @@ fn run_session(
     stop: &AtomicBool,
 ) -> Result<(), AsrError> {
     let client_events = client.events();
-    let mut saw_speech = false;
+    // True while an utterance has started but not yet been finalized.
+    let mut utterance_open = false;
 
     loop {
         if stop.load(Ordering::Acquire) {
@@ -103,7 +104,7 @@ fn run_session(
 
         let signal = endpointer.observe(&frame);
         if matches!(signal, Some(EndpointSignal::StartOfSpeech)) {
-            saw_speech = true;
+            utterance_open = true;
         }
 
         client.push_frame(&frame)?;
@@ -121,11 +122,11 @@ fn run_session(
             .map_err(|_| AsrError::Closed)?;
             client.finalize()?;
             forward_available(&client_events, out)?;
-            saw_speech = false;
+            utterance_open = false;
         }
     }
 
-    if saw_speech {
+    if utterance_open {
         client.finalize()?;
         forward_available(&client_events, out)?;
     }
