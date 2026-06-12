@@ -131,3 +131,69 @@ fn mock_reply_streams_started_tokens_final_then_done() {
     }
     assert!(matches!(generation.poll(), ReplyPoll::Done), "poll after done is stable");
 }
+
+use std::time::Duration;
+
+use crossbeam_channel::unbounded;
+use respondent_lib::llm::session::ReplySession;
+
+#[test]
+fn session_streams_started_tokens_final_for_one_trigger() {
+    let (tx, rx) = unbounded();
+    let session = ReplySession::start(rx, Box::new(MockReplyClient), ReplyTrigger::new("s1"));
+    let events = session.events();
+
+    tx.send(partial("hel")).unwrap();
+    tx.send(endpoint()).unwrap();
+    tx.send(final_event("hello there")).unwrap();
+    drop(tx);
+
+    let mut collected = Vec::new();
+    while let Ok(event) = events.recv_timeout(Duration::from_secs(2)) {
+        collected.push(event);
+    }
+    session.stop().unwrap();
+
+    assert!(matches!(collected.first(), Some(ReplyEvent::Started { .. })));
+    assert!(collected.iter().any(|event| matches!(event, ReplyEvent::Token { .. })));
+    match collected.last() {
+        Some(ReplyEvent::Final { generation_id, .. }) => {
+            assert_eq!(generation_id.as_str(), "gen-1");
+        }
+        other => panic!("expected final, got {other:?}"),
+    }
+}
+
+#[test]
+fn session_latest_trigger_wins() {
+    let (tx, rx) = unbounded();
+    let session = ReplySession::start(rx, Box::new(MockReplyClient), ReplyTrigger::new("s1"));
+    let events = session.events();
+
+    // Two triggers queued before the worker pumps; the latest must win.
+    tx.send(endpoint()).unwrap();
+    tx.send(final_event("first")).unwrap();
+    tx.send(endpoint()).unwrap();
+    tx.send(final_event("second")).unwrap();
+    drop(tx);
+
+    let mut collected = Vec::new();
+    while let Ok(event) = events.recv_timeout(Duration::from_secs(2)) {
+        collected.push(event);
+    }
+    session.stop().unwrap();
+
+    let last_final_gen = collected.iter().rev().find_map(|event| match event {
+        ReplyEvent::Final { generation_id, .. } => Some(generation_id.clone()),
+        _ => None,
+    });
+    assert_eq!(last_final_gen.as_deref(), Some("gen-2"));
+
+    let gen1_finals = collected
+        .iter()
+        .filter(|event| {
+            matches!(event, ReplyEvent::Final { generation_id, .. } if generation_id.as_str() == "gen-1")
+        })
+        .count();
+    assert_eq!(gen1_finals, 0, "gen-1 was superseded and must not produce a final");
+}
