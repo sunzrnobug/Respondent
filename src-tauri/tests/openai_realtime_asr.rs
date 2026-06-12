@@ -189,6 +189,39 @@ fn non_20ms_frame_is_rejected_without_append() {
 }
 
 #[test]
+fn finalize_flushes_pending_audio_before_commit() {
+    let (handle, transport) = RecordingTransport::new();
+    let mut client =
+        OpenAiRealtimeAsrClient::with_transport("s1".to_string(), config(), Box::new(transport))
+            .expect("client");
+
+    client
+        .push_frame(&mono_16k_frame((0..320).collect(), 100))
+        .expect("push frame");
+    client.finalize().expect("finalize");
+
+    let sent = handle.sent();
+    let event_types = sent
+        .iter()
+        .map(|message| message["type"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        event_types,
+        vec![
+            "session.update",
+            "input_audio_buffer.append",
+            "input_audio_buffer.commit",
+        ]
+    );
+
+    let audio = sent[1]["audio"].as_str().expect("tail audio base64");
+    let bytes = STANDARD.decode(audio).expect("valid base64");
+    assert!(!bytes.is_empty());
+    assert!(bytes.len() < 960);
+}
+
+#[test]
 fn default_config_uses_low_latency_model_and_delay() {
     let config = OpenAiRealtimeConfig::from_api_key("k");
 
