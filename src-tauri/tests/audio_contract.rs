@@ -1,8 +1,8 @@
-use respondent_lib::audio::devices::{list_output_devices, OutputDevice};
 use respondent_lib::audio::convert::{
-    downmix_to_mono, to_pcm16, TARGET_BITS_PER_SAMPLE, TARGET_CHANNELS, TARGET_FRAME_SAMPLES,
-    TARGET_RATE,
+    downmix_to_mono, to_pcm16, FrameChunker, LinearResampler, TARGET_BITS_PER_SAMPLE,
+    TARGET_CHANNELS, TARGET_FRAME_SAMPLES, TARGET_RATE,
 };
+use respondent_lib::audio::devices::{list_output_devices, OutputDevice};
 use respondent_lib::audio::frame::{AudioFrame, PcmFormat};
 
 #[test]
@@ -54,7 +54,60 @@ fn downmix_zero_channels_returns_empty_output() {
 
 #[test]
 fn quantizes_float_samples_to_pcm16_with_clamp() {
-    assert_eq!(to_pcm16(&[1.5, -1.5, 0.0, 0.5]), vec![32767, -32767, 0, 16384]);
+    assert_eq!(
+        to_pcm16(&[1.5, -1.5, 0.0, 0.5]),
+        vec![32767, -32767, 0, 16384]
+    );
+}
+
+#[test]
+fn resampler_passes_through_when_rates_match() {
+    let mut resampler = LinearResampler::new(16_000, 16_000);
+    assert_eq!(resampler.process(&[0.0, 0.5, 1.0]), vec![0.0, 0.5, 1.0]);
+}
+
+#[test]
+fn resampler_downsamples_48khz_to_16khz_at_integer_ratio() {
+    let mut resampler = LinearResampler::new(48_000, 16_000);
+    assert_eq!(
+        resampler.process(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+        vec![0.0, 3.0]
+    );
+}
+
+#[test]
+fn resampler_keeps_fractional_ratio_output_monotonic() {
+    let mut resampler = LinearResampler::new(44_100, 16_000);
+    let output = resampler.process(&(0..100).map(|value| value as f32).collect::<Vec<_>>());
+    assert!((35..=37).contains(&output.len()));
+    assert!(output.windows(2).all(|pair| pair[0] <= pair[1]));
+}
+
+#[test]
+fn resampler_is_continuous_across_chunks() {
+    let input = (0..128).map(|value| value as f32).collect::<Vec<_>>();
+    let mut one_pass = LinearResampler::new(48_000, 16_000);
+    let expected = one_pass.process(&input);
+
+    let mut chunked = LinearResampler::new(48_000, 16_000);
+    let mut actual = chunked.process(&input[..64]);
+    actual.extend(chunked.process(&input[64..]));
+
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn frame_chunker_emits_full_320_sample_frames_and_retains_remainder() {
+    let mut chunker = FrameChunker::new();
+    let first = chunker.push(&vec![1; 800]);
+    assert_eq!(first.len(), 2);
+    assert!(first.iter().all(|frame| frame.len() == 320));
+    assert_eq!(chunker.pending_len(), 160);
+
+    let second = chunker.push(&vec![2; 160]);
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].len(), 320);
+    assert_eq!(chunker.pending_len(), 0);
 }
 
 #[test]
