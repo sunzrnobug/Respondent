@@ -11,7 +11,11 @@ use super::client::{AsrError, AsrEvent, StreamingAsrClient};
 use super::endpointer::{EndpointSignal, EnergyEndpointer};
 
 const OUTPUT_CAPACITY: usize = 256;
+/// Max time the worker blocks waiting for the consumer to observe the stop flag.
 const FRAME_WAIT: Duration = Duration::from_millis(100);
+/// Max time the worker blocks sending one event before giving up (avoids a
+/// deadlock if a stopped consumer never drains the output channel).
+const SEND_TIMEOUT: Duration = Duration::from_millis(200);
 
 pub struct TranscriptionSession {
     events: Receiver<AsrEvent>,
@@ -81,7 +85,7 @@ fn run_session(
     client: &mut dyn StreamingAsrClient,
     endpointer: &mut EnergyEndpointer,
     out: &Sender<AsrEvent>,
-    stop: &Arc<AtomicBool>,
+    stop: &AtomicBool,
 ) -> Result<(), AsrError> {
     let client_events = client.events();
     let mut saw_speech = false;
@@ -106,11 +110,14 @@ fn run_session(
         forward_available(&client_events, out)?;
 
         if matches!(signal, Some(EndpointSignal::EndOfSpeech)) {
-            out.send(AsrEvent::Endpoint {
-                session_id: session_id.to_string(),
-                silence_ms: endpointer.silence_window_ms() as i64,
-                detected_at_ms: frame.captured_at_ms as i64,
-            })
+            out.send_timeout(
+                AsrEvent::Endpoint {
+                    session_id: session_id.to_string(),
+                    silence_ms: endpointer.silence_window_ms() as i64,
+                    detected_at_ms: frame.captured_at_ms as i64,
+                },
+                SEND_TIMEOUT,
+            )
             .map_err(|_| AsrError::Closed)?;
             client.finalize()?;
             forward_available(&client_events, out)?;
@@ -130,7 +137,8 @@ fn forward_available(
     out: &Sender<AsrEvent>,
 ) -> Result<(), AsrError> {
     while let Ok(event) = client_events.try_recv() {
-        out.send(event).map_err(|_| AsrError::Closed)?;
+        out.send_timeout(event, SEND_TIMEOUT)
+            .map_err(|_| AsrError::Closed)?;
     }
     Ok(())
 }
