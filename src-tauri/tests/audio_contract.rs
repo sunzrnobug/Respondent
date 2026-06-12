@@ -1,6 +1,7 @@
 use respondent_lib::audio::devices::{list_output_devices, OutputDevice};
 use respondent_lib::audio::convert::{
-    downmix_to_mono, to_pcm16, TARGET_CHANNELS, TARGET_FRAME_SAMPLES, TARGET_RATE,
+    downmix_to_mono, to_pcm16, TARGET_BITS_PER_SAMPLE, TARGET_CHANNELS, TARGET_FRAME_SAMPLES,
+    TARGET_RATE,
 };
 use respondent_lib::audio::frame::{AudioFrame, PcmFormat};
 
@@ -24,6 +25,7 @@ fn computes_frame_duration_for_16khz_mono_pcm() {
 fn target_capture_format_is_16khz_mono_20ms() {
     assert_eq!(TARGET_RATE, 16_000);
     assert_eq!(TARGET_CHANNELS, 1);
+    assert_eq!(TARGET_BITS_PER_SAMPLE, 16);
     assert_eq!(TARGET_FRAME_SAMPLES, 320);
 }
 
@@ -31,6 +33,12 @@ fn target_capture_format_is_16khz_mono_20ms() {
 fn downmixes_stereo_to_mono_by_averaging_channels() {
     let mono = downmix_to_mono(&[1.0, -1.0, 0.5, 0.25], 2);
     assert_eq!(mono, vec![0.0, 0.375]);
+}
+
+#[test]
+fn downmix_ignores_incomplete_interleaved_tail() {
+    let mono = downmix_to_mono(&[1.0, 0.0, 99.0], 2);
+    assert_eq!(mono, vec![0.5]);
 }
 
 #[test]
