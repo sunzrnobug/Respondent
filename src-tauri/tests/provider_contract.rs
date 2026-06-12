@@ -46,6 +46,6 @@ fn reply_token_serializes_to_frontend_contract() {
 
 #[test]
 fn mock_clients_report_their_names() {
-    assert_eq!(MockAsrClient.name(), "mock-asr");
+    assert_eq!(MockAsrClient::new("s1").name(), "mock-asr");
     assert_eq!(MockReplyClient.name(), "mock-llm");
 }
