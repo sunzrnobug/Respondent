@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use crossbeam_channel::{unbounded, Receiver, Sender};
@@ -147,21 +148,50 @@ impl OpenAiRealtimeAsrClient {
     }
 
     fn handle_provider_event(&mut self, event: Value) -> Result<(), AsrError> {
-        let event_type = event.get("type").and_then(Value::as_str);
-        if event_type == Some("error") {
-            return Err(AsrError::Provider("openai realtime error".to_string()));
-        }
+        match event["type"].as_str() {
+            Some("conversation.item.input_audio_transcription.delta") => {
+                let item_id = event["item_id"].as_str().unwrap_or("unknown").to_string();
+                let delta = event["delta"].as_str().unwrap_or_default();
+                let text = self.item_text.entry(item_id).or_default();
+                text.push_str(delta);
+                let text = text.clone();
 
-        // Transcript parsing lands in the next tasks; keep the planned state
-        // fields present without changing Task 1's provider-event behavior.
-        let _planned_state = (
-            &self.session_id,
-            &self.sender,
-            &self.item_text,
-            self.utterance_started_at_ms,
-            self.last_frame_ended_at_ms,
-        );
-        Ok(())
+                self.sender
+                    .send(AsrEvent::Partial {
+                        session_id: self.session_id.clone(),
+                        text,
+                        started_at_ms: self.utterance_started_at_ms.unwrap_or(0),
+                        ended_at_ms: self.last_frame_ended_at_ms,
+                        received_at_ms: now_ms(),
+                    })
+                    .map_err(|_| AsrError::Closed)
+            }
+            Some("conversation.item.input_audio_transcription.completed") => {
+                let item_id = event["item_id"].as_str().unwrap_or("unknown");
+                let transcript = event["transcript"].as_str().unwrap_or_default().to_string();
+                self.item_text.remove(item_id);
+
+                self.sender
+                    .send(AsrEvent::Final {
+                        session_id: self.session_id.clone(),
+                        text: transcript,
+                        started_at_ms: self.utterance_started_at_ms.unwrap_or(0),
+                        ended_at_ms: self.last_frame_ended_at_ms,
+                        received_at_ms: now_ms(),
+                    })
+                    .map_err(|_| AsrError::Closed)
+            }
+            Some("error") => {
+                let detail = event["error"]["message"]
+                    .as_str()
+                    .or_else(|| event["message"].as_str())
+                    .unwrap_or("provider error");
+                Err(AsrError::Provider(format!(
+                    "openai realtime error: {detail}"
+                )))
+            }
+            _ => Ok(()),
+        }
     }
 
     fn validate_frame(&self, frame: &AudioFrame) -> Result<(), AsrError> {
@@ -259,4 +289,11 @@ fn encode_pcm16_base64(samples: &[i16]) -> String {
         .flat_map(i16::to_le_bytes)
         .collect::<Vec<_>>();
     STANDARD.encode(bytes)
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
 }

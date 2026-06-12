@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use respondent_lib::asr::client::{AsrError, StreamingAsrClient};
+use respondent_lib::asr::client::{AsrError, AsrEvent, StreamingAsrClient};
 use respondent_lib::asr::openai_realtime::{
     OpenAiRealtimeAsrClient, OpenAiRealtimeConfig, RealtimeTransport, TranscriptionDelay,
 };
@@ -29,6 +29,10 @@ impl RecordingTransport {
                 recv: VecDeque::new(),
             },
         )
+    }
+
+    fn queue(&mut self, value: Value) {
+        self.recv.push_back(value);
     }
 }
 
@@ -219,6 +223,114 @@ fn finalize_flushes_pending_audio_before_commit() {
     let bytes = STANDARD.decode(audio).expect("valid base64");
     assert!(!bytes.is_empty());
     assert!(bytes.len() < 960);
+}
+
+#[test]
+fn finalize_commits_without_requiring_a_final() {
+    let (handle, transport) = RecordingTransport::new();
+    let mut client =
+        OpenAiRealtimeAsrClient::with_transport("s1".to_string(), config(), Box::new(transport))
+            .expect("client");
+
+    client.finalize().expect("commit");
+
+    assert!(handle
+        .sent()
+        .iter()
+        .any(|message| message["type"] == "input_audio_buffer.commit"));
+}
+
+#[test]
+fn delta_accumulates_into_partial() {
+    let (_, mut transport) = RecordingTransport::new();
+    transport.queue(json!({
+        "type": "conversation.item.input_audio_transcription.delta",
+        "item_id": "item_1",
+        "delta": "Hello",
+    }));
+    transport.queue(json!({
+        "type": "conversation.item.input_audio_transcription.delta",
+        "item_id": "item_1",
+        "delta": ", world",
+    }));
+    let mut client =
+        OpenAiRealtimeAsrClient::with_transport("s1".to_string(), config(), Box::new(transport))
+            .expect("client");
+    let events = client.events();
+
+    client
+        .push_frame(&mono_16k_frame(vec![0; 320], 100))
+        .expect("push frame");
+
+    match events.try_recv().expect("first partial") {
+        AsrEvent::Partial { text, .. } => assert_eq!(text, "Hello"),
+        other => panic!("expected partial, got {other:?}"),
+    }
+    match events.try_recv().expect("second partial") {
+        AsrEvent::Partial { text, .. } => assert_eq!(text, "Hello, world"),
+        other => panic!("expected partial, got {other:?}"),
+    }
+}
+
+#[test]
+fn completed_emits_final_and_clears_buffer() {
+    let (_, mut transport) = RecordingTransport::new();
+    transport.queue(json!({
+        "type": "conversation.item.input_audio_transcription.delta",
+        "item_id": "item_1",
+        "delta": "draft",
+    }));
+    transport.queue(json!({
+        "type": "conversation.item.input_audio_transcription.completed",
+        "item_id": "item_1",
+        "transcript": "final text",
+    }));
+    transport.queue(json!({
+        "type": "conversation.item.input_audio_transcription.delta",
+        "item_id": "item_1",
+        "delta": "new",
+    }));
+    let mut client =
+        OpenAiRealtimeAsrClient::with_transport("s1".to_string(), config(), Box::new(transport))
+            .expect("client");
+    let events = client.events();
+
+    client
+        .push_frame(&mono_16k_frame(vec![0; 320], 100))
+        .expect("push frame");
+
+    let collected = events.try_iter().collect::<Vec<_>>();
+    assert!(collected
+        .iter()
+        .any(|event| matches!(event, AsrEvent::Final { text, .. } if text == "final text")));
+    assert!(collected
+        .iter()
+        .any(|event| matches!(event, AsrEvent::Partial { text, .. } if text == "new")));
+    assert!(!collected
+        .iter()
+        .any(|event| matches!(event, AsrEvent::Partial { text, .. } if text.contains("draftnew"))));
+}
+
+#[test]
+fn provider_error_event_returns_provider_error_without_secret() {
+    let (_, mut transport) = RecordingTransport::new();
+    transport.queue(json!({
+        "type": "error",
+        "error": {
+            "message": "bad audio",
+        },
+    }));
+    let mut client =
+        OpenAiRealtimeAsrClient::with_transport("s1".to_string(), config(), Box::new(transport))
+            .expect("client");
+
+    let err = client
+        .push_frame(&mono_16k_frame(vec![0; 320], 100))
+        .expect_err("provider error");
+
+    let message = err.to_string();
+    assert!(message.contains("bad audio"));
+    assert!(!message.contains("test-key"));
 }
 
 #[test]
