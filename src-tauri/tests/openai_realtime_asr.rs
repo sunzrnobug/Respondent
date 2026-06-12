@@ -12,11 +12,12 @@ use serde_json::{json, Value};
 #[derive(Clone, Default)]
 struct RecordingHandle {
     sent: Arc<Mutex<Vec<Value>>>,
+    recv: Arc<Mutex<VecDeque<Value>>>,
 }
 
 struct RecordingTransport {
     sent: Arc<Mutex<Vec<Value>>>,
-    recv: VecDeque<Value>,
+    recv: Arc<Mutex<VecDeque<Value>>>,
 }
 
 impl RecordingTransport {
@@ -25,20 +26,20 @@ impl RecordingTransport {
         (
             handle.clone(),
             Self {
-                sent: handle.sent,
-                recv: VecDeque::new(),
+                sent: Arc::clone(&handle.sent),
+                recv: Arc::clone(&handle.recv),
             },
         )
-    }
-
-    fn queue(&mut self, value: Value) {
-        self.recv.push_back(value);
     }
 }
 
 impl RecordingHandle {
     fn sent(&self) -> Vec<Value> {
         self.sent.lock().expect("sent lock").clone()
+    }
+
+    fn queue(&self, value: Value) {
+        self.recv.lock().expect("recv lock").push_back(value);
     }
 }
 
@@ -49,7 +50,7 @@ impl RealtimeTransport for RecordingTransport {
     }
 
     fn try_recv_json(&mut self) -> Result<Option<Value>, AsrError> {
-        Ok(self.recv.pop_front())
+        Ok(self.recv.lock().expect("recv lock").pop_front())
     }
 
     fn close(&mut self) -> Result<(), AsrError> {
@@ -242,13 +243,13 @@ fn finalize_commits_without_requiring_a_final() {
 
 #[test]
 fn delta_accumulates_into_partial() {
-    let (_, mut transport) = RecordingTransport::new();
-    transport.queue(json!({
+    let (handle, transport) = RecordingTransport::new();
+    handle.queue(json!({
         "type": "conversation.item.input_audio_transcription.delta",
         "item_id": "item_1",
         "delta": "Hello",
     }));
-    transport.queue(json!({
+    handle.queue(json!({
         "type": "conversation.item.input_audio_transcription.delta",
         "item_id": "item_1",
         "delta": ", world",
@@ -274,18 +275,18 @@ fn delta_accumulates_into_partial() {
 
 #[test]
 fn completed_emits_final_and_clears_buffer() {
-    let (_, mut transport) = RecordingTransport::new();
-    transport.queue(json!({
+    let (handle, transport) = RecordingTransport::new();
+    handle.queue(json!({
         "type": "conversation.item.input_audio_transcription.delta",
         "item_id": "item_1",
         "delta": "draft",
     }));
-    transport.queue(json!({
+    handle.queue(json!({
         "type": "conversation.item.input_audio_transcription.completed",
         "item_id": "item_1",
         "transcript": "final text",
     }));
-    transport.queue(json!({
+    handle.queue(json!({
         "type": "conversation.item.input_audio_transcription.delta",
         "item_id": "item_1",
         "delta": "new",
@@ -313,8 +314,8 @@ fn completed_emits_final_and_clears_buffer() {
 
 #[test]
 fn provider_error_event_returns_provider_error_without_secret() {
-    let (_, mut transport) = RecordingTransport::new();
-    transport.queue(json!({
+    let (handle, transport) = RecordingTransport::new();
+    handle.queue(json!({
         "type": "error",
         "error": {
             "message": "bad audio",
@@ -331,6 +332,69 @@ fn provider_error_event_returns_provider_error_without_secret() {
     let message = err.to_string();
     assert!(message.contains("bad audio"));
     assert!(!message.contains("test-key"));
+}
+
+#[test]
+fn late_completed_event_keeps_committed_utterance_timestamps() {
+    let (handle, transport) = RecordingTransport::new();
+    let mut client =
+        OpenAiRealtimeAsrClient::with_transport("s1".to_string(), config(), Box::new(transport))
+            .expect("client");
+    let events = client.events();
+
+    client
+        .push_frame(&mono_16k_frame(vec![0; 320], 100))
+        .expect("first utterance frame");
+    client.finalize().expect("first commit");
+    client
+        .push_frame(&mono_16k_frame(vec![0; 320], 500))
+        .expect("second utterance first frame");
+    handle.queue(json!({
+        "type": "conversation.item.input_audio_transcription.completed",
+        "item_id": "item_1",
+        "transcript": "first final",
+    }));
+    handle.queue(json!({
+        "type": "conversation.item.input_audio_transcription.delta",
+        "item_id": "item_2",
+        "delta": "second",
+    }));
+    client
+        .push_frame(&mono_16k_frame(vec![0; 320], 520))
+        .expect("drain late events");
+
+    let collected = events.try_iter().collect::<Vec<_>>();
+    let final_event = collected
+        .iter()
+        .find(|event| matches!(event, AsrEvent::Final { text, .. } if text == "first final"))
+        .expect("late final");
+    let partial_event = collected
+        .iter()
+        .find(|event| matches!(event, AsrEvent::Partial { text, .. } if text == "second"))
+        .expect("second utterance partial");
+
+    match final_event {
+        AsrEvent::Final {
+            started_at_ms,
+            ended_at_ms,
+            ..
+        } => {
+            assert_eq!(*started_at_ms, 100);
+            assert_eq!(*ended_at_ms, 120);
+        }
+        other => panic!("expected final, got {other:?}"),
+    }
+    match partial_event {
+        AsrEvent::Partial {
+            started_at_ms,
+            ended_at_ms,
+            ..
+        } => {
+            assert_eq!(*started_at_ms, 500);
+            assert_eq!(*ended_at_ms, 540);
+        }
+        other => panic!("expected partial, got {other:?}"),
+    }
 }
 
 #[test]

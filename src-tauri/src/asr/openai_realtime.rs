@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -15,6 +15,12 @@ const OPENAI_REALTIME_SAMPLE_RATE: u32 = 24_000;
 const PROJECT_SAMPLE_RATE: u32 = 16_000;
 const PROJECT_FRAME_SAMPLES: usize = 320;
 const OPENAI_APPEND_SAMPLES: usize = 480;
+
+#[derive(Debug, Clone, Copy)]
+struct UtteranceTiming {
+    started_at_ms: i64,
+    ended_at_ms: i64,
+}
 
 pub trait RealtimeTransport: Send {
     fn send_json(&mut self, value: Value) -> Result<(), AsrError>;
@@ -80,6 +86,8 @@ pub struct OpenAiRealtimeAsrClient {
     sender: Sender<AsrEvent>,
     receiver: Receiver<AsrEvent>,
     item_text: HashMap<String, String>,
+    item_timing: HashMap<String, UtteranceTiming>,
+    pending_committed_timings: VecDeque<UtteranceTiming>,
     utterance_started_at_ms: Option<i64>,
     last_frame_ended_at_ms: i64,
     resampler: LinearResampler,
@@ -104,6 +112,8 @@ impl OpenAiRealtimeAsrClient {
             sender,
             receiver,
             item_text: HashMap::new(),
+            item_timing: HashMap::new(),
+            pending_committed_timings: VecDeque::new(),
             utterance_started_at_ms: None,
             last_frame_ended_at_ms: 0,
             resampler: LinearResampler::new(PROJECT_SAMPLE_RATE, OPENAI_REALTIME_SAMPLE_RATE),
@@ -152,16 +162,17 @@ impl OpenAiRealtimeAsrClient {
             Some("conversation.item.input_audio_transcription.delta") => {
                 let item_id = event["item_id"].as_str().unwrap_or("unknown").to_string();
                 let delta = event["delta"].as_str().unwrap_or_default();
-                let text = self.item_text.entry(item_id).or_default();
+                let text = self.item_text.entry(item_id.clone()).or_default();
                 text.push_str(delta);
                 let text = text.clone();
+                let timing = self.timing_for_item(&item_id);
 
                 self.sender
                     .send(AsrEvent::Partial {
                         session_id: self.session_id.clone(),
                         text,
-                        started_at_ms: self.utterance_started_at_ms.unwrap_or(0),
-                        ended_at_ms: self.last_frame_ended_at_ms,
+                        started_at_ms: timing.started_at_ms,
+                        ended_at_ms: timing.ended_at_ms,
                         received_at_ms: now_ms(),
                     })
                     .map_err(|_| AsrError::Closed)
@@ -170,13 +181,15 @@ impl OpenAiRealtimeAsrClient {
                 let item_id = event["item_id"].as_str().unwrap_or("unknown");
                 let transcript = event["transcript"].as_str().unwrap_or_default().to_string();
                 self.item_text.remove(item_id);
+                let timing = self.timing_for_item(item_id);
+                self.item_timing.remove(item_id);
 
                 self.sender
                     .send(AsrEvent::Final {
                         session_id: self.session_id.clone(),
                         text: transcript,
-                        started_at_ms: self.utterance_started_at_ms.unwrap_or(0),
-                        ended_at_ms: self.last_frame_ended_at_ms,
+                        started_at_ms: timing.started_at_ms,
+                        ended_at_ms: timing.ended_at_ms,
                         received_at_ms: now_ms(),
                     })
                     .map_err(|_| AsrError::Closed)
@@ -191,6 +204,25 @@ impl OpenAiRealtimeAsrClient {
                 )))
             }
             _ => Ok(()),
+        }
+    }
+
+    fn timing_for_item(&mut self, item_id: &str) -> UtteranceTiming {
+        if let Some(timing) = self.item_timing.get(item_id).copied() {
+            return timing;
+        }
+        let timing = self
+            .pending_committed_timings
+            .pop_front()
+            .unwrap_or_else(|| self.current_utterance_timing());
+        self.item_timing.insert(item_id.to_string(), timing);
+        timing
+    }
+
+    fn current_utterance_timing(&self) -> UtteranceTiming {
+        UtteranceTiming {
+            started_at_ms: self.utterance_started_at_ms.unwrap_or(0),
+            ended_at_ms: self.last_frame_ended_at_ms,
         }
     }
 
@@ -269,9 +301,14 @@ impl StreamingAsrClient for OpenAiRealtimeAsrClient {
     }
 
     fn finalize(&mut self) -> Result<(), AsrError> {
+        let committed_timing = self.utterance_started_at_ms.map(|_| self.current_utterance_timing());
         self.flush_pending_audio()?;
         self.transport
             .send_json(json!({"type": "input_audio_buffer.commit"}))?;
+        if let Some(timing) = committed_timing {
+            self.pending_committed_timings.push_back(timing);
+            self.utterance_started_at_ms = None;
+        }
         self.drain_provider_events()
     }
 }
