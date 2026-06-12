@@ -11,6 +11,9 @@ use crate::audio::frame::AudioFrame;
 use super::client::{AsrError, AsrEvent, StreamingAsrClient};
 
 const OPENAI_REALTIME_SAMPLE_RATE: u32 = 24_000;
+const PROJECT_SAMPLE_RATE: u32 = 16_000;
+const PROJECT_FRAME_SAMPLES: usize = 320;
+const OPENAI_APPEND_SAMPLES: usize = 480;
 
 pub trait RealtimeTransport: Send {
     fn send_json(&mut self, value: Value) -> Result<(), AsrError>;
@@ -79,6 +82,7 @@ pub struct OpenAiRealtimeAsrClient {
     utterance_started_at_ms: Option<i64>,
     last_frame_ended_at_ms: i64,
     resampler: LinearResampler,
+    pending_output_samples: Vec<i16>,
 }
 
 impl OpenAiRealtimeAsrClient {
@@ -101,7 +105,8 @@ impl OpenAiRealtimeAsrClient {
             item_text: HashMap::new(),
             utterance_started_at_ms: None,
             last_frame_ended_at_ms: 0,
-            resampler: LinearResampler::new(16_000, OPENAI_REALTIME_SAMPLE_RATE),
+            resampler: LinearResampler::new(PROJECT_SAMPLE_RATE, OPENAI_REALTIME_SAMPLE_RATE),
+            pending_output_samples: Vec::new(),
         };
         client.send_session_update()?;
         Ok(client)
@@ -168,31 +173,44 @@ impl OpenAiRealtimeAsrClient {
                 "openai realtime asr expects 16 kHz mono i16 frames".to_string(),
             ));
         }
+        if frame.samples.len() != PROJECT_FRAME_SAMPLES {
+            return Err(AsrError::Provider(
+                "openai realtime asr expects 20 ms frames".to_string(),
+            ));
+        }
         Ok(())
     }
 
-    fn encode_frame(&mut self, frame: &AudioFrame) -> String {
+    fn encode_frame_chunks(&mut self, frame: &AudioFrame) -> Vec<String> {
         let normalized = frame
             .samples
             .iter()
             .map(|sample| *sample as f32 / i16::MAX as f32)
             .collect::<Vec<_>>();
-        let mut resampled = self.resampler.process(&normalized);
-        let expected_samples = frame.samples.len() * OPENAI_REALTIME_SAMPLE_RATE as usize
-            / frame.format.sample_rate as usize;
+        let resampled = self.resampler.process(&normalized);
+        self.pending_output_samples.extend(to_pcm16(&resampled));
 
-        if resampled.len() < expected_samples {
-            let pad = normalized.last().copied().unwrap_or_default();
-            resampled.resize(expected_samples, pad);
-        } else if resampled.len() > expected_samples {
-            resampled.truncate(expected_samples);
+        let mut payloads = Vec::new();
+        while self.pending_output_samples.len() >= OPENAI_APPEND_SAMPLES {
+            let chunk = self
+                .pending_output_samples
+                .drain(..OPENAI_APPEND_SAMPLES)
+                .collect::<Vec<_>>();
+            payloads.push(encode_pcm16_base64(&chunk));
         }
+        payloads
+    }
 
-        let bytes = to_pcm16(&resampled)
-            .into_iter()
-            .flat_map(i16::to_le_bytes)
-            .collect::<Vec<_>>();
-        STANDARD.encode(bytes)
+    fn flush_pending_audio(&mut self) -> Result<(), AsrError> {
+        if self.pending_output_samples.is_empty() {
+            return Ok(());
+        }
+        let payload = encode_pcm16_base64(&self.pending_output_samples);
+        self.pending_output_samples.clear();
+        self.transport.send_json(json!({
+            "type": "input_audio_buffer.append",
+            "audio": payload,
+        }))
     }
 }
 
@@ -207,11 +225,12 @@ impl StreamingAsrClient for OpenAiRealtimeAsrClient {
             self.utterance_started_at_ms = Some(frame.captured_at_ms as i64);
         }
         self.last_frame_ended_at_ms = frame.captured_at_ms as i64 + frame.duration_ms() as i64;
-        let payload = self.encode_frame(frame);
-        self.transport.send_json(json!({
-            "type": "input_audio_buffer.append",
-            "audio": payload,
-        }))?;
+        for payload in self.encode_frame_chunks(frame) {
+            self.transport.send_json(json!({
+                "type": "input_audio_buffer.append",
+                "audio": payload,
+            }))?;
+        }
         self.drain_provider_events()
     }
 
@@ -220,6 +239,7 @@ impl StreamingAsrClient for OpenAiRealtimeAsrClient {
     }
 
     fn finalize(&mut self) -> Result<(), AsrError> {
+        self.flush_pending_audio()?;
         self.transport
             .send_json(json!({"type": "input_audio_buffer.commit"}))?;
         self.drain_provider_events()
@@ -230,4 +250,13 @@ impl Drop for OpenAiRealtimeAsrClient {
     fn drop(&mut self) {
         let _ = self.transport.close();
     }
+}
+
+fn encode_pcm16_base64(samples: &[i16]) -> String {
+    let bytes = samples
+        .iter()
+        .copied()
+        .flat_map(i16::to_le_bytes)
+        .collect::<Vec<_>>();
+    STANDARD.encode(bytes)
 }

@@ -109,28 +109,41 @@ fn new_sends_transcription_session_update() {
     assert!(update["session"]["audio"]["input"]["turn_detection"].is_null());
 }
 
+fn append_messages(sent: &[Value]) -> Vec<&Value> {
+    sent.iter()
+        .filter(|message| message["type"] == "input_audio_buffer.append")
+        .collect()
+}
+
 #[test]
-fn push_frame_appends_24khz_base64_pcm() {
+fn two_frames_append_one_continuous_24khz_pcm_chunk() {
     let (handle, transport) = RecordingTransport::new();
     let mut client =
         OpenAiRealtimeAsrClient::with_transport("s1".to_string(), config(), Box::new(transport))
             .expect("client");
 
-    let frame = mono_16k_frame(vec![1000; 320], 100);
+    client
+        .push_frame(&mono_16k_frame((0..320).collect(), 100))
+        .expect("push first frame");
+    assert!(
+        append_messages(&handle.sent()).is_empty(),
+        "first frame should not be padded into a synthetic 24 kHz chunk"
+    );
 
-    client.push_frame(&frame).expect("push frame");
+    client
+        .push_frame(&mono_16k_frame((320..640).collect(), 120))
+        .expect("push second frame");
 
     let sent = handle.sent();
-    let append = sent
-        .iter()
-        .find(|message| message["type"] == "input_audio_buffer.append")
-        .expect("append message");
+    let appends = append_messages(&sent);
+    assert_eq!(appends.len(), 1);
+    let append = appends[0];
     let audio = append["audio"].as_str().expect("audio base64");
     let bytes = STANDARD.decode(audio).expect("valid base64");
 
     assert_eq!(bytes.len(), 960);
-    assert_eq!(bytes[0], 232);
-    assert_eq!(bytes[1], 3);
+    assert_eq!(i16::from_le_bytes([bytes[0], bytes[1]]), 0);
+    assert_eq!(i16::from_le_bytes([bytes[2], bytes[3]]), 1);
 }
 
 #[test]
@@ -158,6 +171,21 @@ fn wrong_frame_format_is_rejected_without_append() {
         .sent()
         .iter()
         .any(|message| message["type"] == "input_audio_buffer.append"));
+}
+
+#[test]
+fn non_20ms_frame_is_rejected_without_append() {
+    let (handle, transport) = RecordingTransport::new();
+    let mut client =
+        OpenAiRealtimeAsrClient::with_transport("s1".to_string(), config(), Box::new(transport))
+            .expect("client");
+
+    let err = client
+        .push_frame(&mono_16k_frame(vec![0; 319], 100))
+        .expect_err("short frames should be rejected");
+
+    assert!(err.to_string().contains("20 ms frames"));
+    assert!(append_messages(&handle.sent()).is_empty());
 }
 
 #[test]
