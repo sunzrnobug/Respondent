@@ -14,6 +14,7 @@ use crate::asr::endpointer::EnergyEndpointer;
 use crate::asr::mock::MockAsrClient;
 use crate::asr::openai_realtime::{OpenAiRealtimeAsrClient, OpenAiRealtimeConfig};
 use crate::asr::session::TranscriptionSession;
+use crate::asr::siliconflow_file::{SiliconFlowFileAsrClient, SiliconFlowFileConfig};
 use crate::audio::capture::LoopbackCapture;
 use crate::audio::devices::{list_output_devices, OutputDevice};
 use crate::llm::client::{ReplyEvent, StreamingReplyClient};
@@ -296,17 +297,54 @@ impl SessionRuntime {
 }
 
 fn build_asr_client(session_id: &str) -> Result<(Box<dyn StreamingAsrClient>, bool), String> {
-    match std::env::var("OPENAI_API_KEY") {
-        Ok(api_key) if !api_key.trim().is_empty() => {
-            let client = OpenAiRealtimeAsrClient::connect(
-                session_id.to_string(),
-                OpenAiRealtimeConfig::from_api_key(api_key),
-            )
-            .map_err(|err| err.to_string())?;
-            Ok((Box::new(client), false))
-        }
+    resolve_asr_client(session_id, &current_env())
+}
+
+pub fn resolve_asr_client(
+    session_id: &str,
+    env: &HashMap<String, String>,
+) -> Result<(Box<dyn StreamingAsrClient>, bool), String> {
+    let provider = env
+        .get("ASR_PROVIDER")
+        .map(|p| p.trim().to_lowercase())
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| "openai_realtime".to_string());
+    let get = |key: &str| env.get(key).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+
+    match provider.as_str() {
+        "siliconflow_file" => match get("SILICONFLOW_API_KEY") {
+            Some(api_key) => {
+                let config = SiliconFlowFileConfig {
+                    base_url: get("SILICONFLOW_BASE_URL")
+                        .unwrap_or_else(|| "https://api.siliconflow.cn/v1".to_string()),
+                    api_key,
+                    model: get("SILICONFLOW_ASR_MODEL")
+                        .unwrap_or_else(|| "FunAudioLLM/SenseVoiceSmall".to_string()),
+                };
+                let client = SiliconFlowFileAsrClient::connect(session_id.to_string(), config)
+                    .map_err(|e| e.to_string())?;
+                Ok((Box::new(client), false))
+            }
+            None => Ok((Box::new(MockAsrClient::new(session_id)), true)),
+        },
+        "openai_realtime" => match get("OPENAI_API_KEY") {
+            Some(api_key) => {
+                let client = OpenAiRealtimeAsrClient::connect(
+                    session_id.to_string(),
+                    OpenAiRealtimeConfig::from_api_key(api_key),
+                )
+                .map_err(|e| e.to_string())?;
+                Ok((Box::new(client), false))
+            }
+            None => Ok((Box::new(MockAsrClient::new(session_id)), true)),
+        },
         _ => Ok((Box::new(MockAsrClient::new(session_id)), true)),
     }
+}
+
+pub fn resolve_asr_provider_name(session_id: &str, env: &HashMap<String, String>) -> &'static str {
+    let (client, _) = resolve_asr_client(session_id, env).expect("resolve asr client");
+    client.name()
 }
 
 /// Build the reply client from an env-like map. Returns (client, using_mock).
