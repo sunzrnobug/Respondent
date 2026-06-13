@@ -5,7 +5,70 @@ use respondent_lib::asr::client::{AsrEvent, StreamingAsrClient};
 use respondent_lib::asr::openai_realtime::{OpenAiRealtimeAsrClient, OpenAiRealtimeConfig};
 use respondent_lib::audio::frame::{AudioFrame, PcmFormat};
 use respondent_lib::llm::client::{ReplyEvent, ReplyPoll, ReplyRequest, StreamingReplyClient};
+use respondent_lib::llm::openai_compatible::{OpenAiCompatibleReplyClient, ProviderConfig};
 use respondent_lib::llm::openai_responses::OpenAiReplyClient;
+
+#[test]
+#[ignore = "uses real SiliconFlow network calls and billable API usage"]
+fn real_siliconflow_llm_smoke_when_api_key_is_present() {
+    let Some(api_key) = std::env::var("SILICONFLOW_API_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        eprintln!("skipping real SiliconFlow E2E smoke: SILICONFLOW_API_KEY is not set");
+        return;
+    };
+    let model = std::env::var("SILICONFLOW_LLM_MODEL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "Qwen/Qwen2.5-7B-Instruct".to_string());
+    eprintln!("[siliconflow] model = {model}");
+
+    let client = OpenAiCompatibleReplyClient::connect(ProviderConfig {
+        base_url: "https://api.siliconflow.cn/v1".into(),
+        api_key,
+        model,
+    })
+    .expect("connect SiliconFlow compatible LLM");
+
+    let mut generation = client.start(ReplyRequest {
+        session_id: "sf-e2e".into(),
+        generation_id: "gen-sf".into(),
+        transcript: "Could you summarize the timeline and next steps?".into(),
+        context: vec!["Could you summarize the timeline and next steps?".into()],
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(40);
+    let mut token_count = 0usize;
+    let mut final_text: Option<String> = None;
+    while Instant::now() < deadline {
+        match generation.poll() {
+            ReplyPoll::Event(ReplyEvent::Started { .. }) => eprintln!("[siliconflow] started"),
+            ReplyPoll::Event(ReplyEvent::Token { token, .. }) => {
+                token_count += 1;
+                eprint!("{token}");
+            }
+            ReplyPoll::Event(ReplyEvent::Final { text, .. }) => final_text = Some(text),
+            ReplyPoll::Pending => thread::sleep(Duration::from_millis(20)),
+            ReplyPoll::Done => break,
+        }
+    }
+
+    let final_text = final_text.expect("SiliconFlow final reply");
+    eprintln!(
+        "\n[siliconflow] tokens={token_count} final_len={}",
+        final_text.len()
+    );
+    assert!(
+        !final_text.trim().is_empty(),
+        "SiliconFlow smoke must produce non-empty final text"
+    );
+    assert!(
+        !final_text.contains("Reply generation failed"),
+        "SiliconFlow request failed (generic failure final returned)"
+    );
+    assert!(token_count > 0, "expected streamed tokens, not just a final");
+}
 
 #[test]
 #[ignore = "uses real OpenAI network calls and billable API usage"]
