@@ -34,3 +34,27 @@ fn creates_session_and_exports_events() {
     assert_eq!(export.events.len(), 2);
     assert_eq!(export.events[0].text, "What is the timeline?");
 }
+
+#[test]
+fn start_session_with_supplied_id_persists_events() {
+    let db = SessionDb::open_in_memory().expect("open db");
+    db.start_session_with_id("session-1", "Meeting", "default-output")
+        .expect("start session with id");
+
+    db.insert_event(EventInsert {
+        session_id: "session-1".into(),
+        event_type: "transcript".into(),
+        text: "hello".into(),
+        is_final: true,
+        started_at_ms: 0,
+        ended_at_ms: 300,
+    })
+    .expect("insert transcript");
+
+    let export = db.load_export("session-1").expect("load export");
+
+    assert_eq!(export.id, "session-1");
+    assert_eq!(export.title, "Meeting");
+    assert_eq!(export.events[0].event_type, "transcript");
+    assert_eq!(export.events[0].text, "hello");
+}

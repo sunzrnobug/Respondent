@@ -63,12 +63,22 @@ impl SessionDb {
 
     pub fn start_session(&self, title: &str, output_device_id: &str) -> rusqlite::Result<String> {
         let id = Uuid::new_v4().to_string();
+        self.start_session_with_id(&id, title, output_device_id)?;
+        Ok(id)
+    }
+
+    pub fn start_session_with_id(
+        &self,
+        id: &str,
+        title: &str,
+        output_device_id: &str,
+    ) -> rusqlite::Result<()> {
         let now = Utc::now().to_rfc3339();
         self.conn.execute(
             "INSERT INTO sessions (id, title, output_device_id, started_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![id, title, output_device_id, now, now],
         )?;
-        Ok(id)
+        Ok(())
     }
 
     pub fn end_session(&self, session_id: &str) -> rusqlite::Result<()> {

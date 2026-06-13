@@ -13,8 +13,11 @@
     "windows": [
       {
         "title": "Respondent",
-        "width": 800,
-        "height": 600
+        "width": 420,
+        "height": 520,
+        "alwaysOnTop": true,
+        "decorations": false,
+        "resizable": false
       }
     ],
     "security": {

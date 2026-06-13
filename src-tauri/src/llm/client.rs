@@ -36,6 +36,32 @@ pub enum ReplyEvent {
     },
 }
 
-pub trait StreamingReplyClient: Send + Sync {
+#[derive(Debug, thiserror::Error)]
+pub enum LlmError {
+    #[error("reply stream closed")]
+    Closed,
+    #[error("llm provider error: {0}")]
+    Provider(String),
+}
+
+/// One pull from a `ReplyGeneration`.
+#[derive(Debug)]
+pub enum ReplyPoll {
+    Event(ReplyEvent),
+    /// No event yet, but generation is still in progress (real adapters that
+    /// await network tokens return this; the mock never does).
+    Pending,
+    Done,
+}
+
+/// A single in-progress reply generation. Pull events with `poll`; dropping
+/// the value cancels the generation.
+pub trait ReplyGeneration: Send {
+    fn poll(&mut self) -> ReplyPoll;
+}
+
+pub trait StreamingReplyClient: Send {
     fn name(&self) -> &'static str;
+    /// Begin generating a reply for `request`; returns the pull handle.
+    fn start(&self, request: ReplyRequest) -> Box<dyn ReplyGeneration>;
 }

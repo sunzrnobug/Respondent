@@ -1,6 +1,15 @@
 import { useMemo, useRef, useState } from "react";
 import { Copy, Pause, Play, Square, ChevronDown, ChevronUp } from "lucide-react";
+import {
+  endNativeSession,
+  listAudioOutputDevices,
+  startNativeSession,
+} from "./services/tauriApi";
 import { runMockRealtimeSession } from "./services/mockRealtime";
+import {
+  isTauriRuntime,
+  listenNativeRealtimeEvents,
+} from "./services/realtimeBridge";
 import {
   createInitialSessionState,
   reduceSessionEvent,
@@ -27,9 +36,41 @@ export default function App() {
     return "Ready";
   }, [session.status]);
 
-  function start() {
+  async function start() {
     const sessionId = createSessionId();
     stopRef.current?.();
+    stopRef.current = null;
+
+    if (isTauriRuntime()) {
+      let stopNativeEvents: (() => void) | null = null;
+      try {
+        stopNativeEvents = await listenNativeRealtimeEvents((event) => {
+          setSession((current) => reduceSessionEvent(current, event));
+        });
+        const devices = await listAudioOutputDevices();
+        const device = devices.find((item) => item.is_default) ?? devices[0];
+        if (!device) {
+          throw new Error("No output device available");
+        }
+        const nativeSessionId = await startNativeSession("Meeting", device.id);
+        setSession(createInitialSessionState(nativeSessionId));
+        stopRef.current = () => {
+          stopNativeEvents?.();
+          void endNativeSession(nativeSessionId);
+        };
+      } catch (error) {
+        stopNativeEvents?.();
+        const message =
+          error instanceof Error ? error.message : "Failed to start session";
+        setSession({
+          ...createInitialSessionState("idle"),
+          status: "idle",
+          systemMessages: [message],
+        });
+      }
+      return;
+    }
+
     setSession(createInitialSessionState(sessionId));
     stopRef.current = runMockRealtimeSession(sessionId, (event) => {
       setSession((current) => reduceSessionEvent(current, event));
