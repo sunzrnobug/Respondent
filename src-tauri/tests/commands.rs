@@ -107,3 +107,11 @@ fn export_helpers_format_markdown_and_plain_text() {
     assert!(markdown.contains("[00:00.300] Suggestion: ask about timing"));
     assert!(text.contains("Transcript: hello"));
 }
+
+#[test]
+fn provider_zhipu_accepts_zai_api_key() {
+    assert_eq!(
+        resolve_reply_provider_name(&env(&[("LLM_PROVIDER", "zhipu"), ("ZAI_API_KEY", "k")])),
+        "openai-compatible-llm"
+    );
+}

@@ -332,8 +332,12 @@ pub fn resolve_reply_client(
         "openai" => {
             return match get("OPENAI_API_KEY") {
                 Some(key) => {
-                    let client = OpenAiReplyClient::connect(OpenAiReplyConfig::from_api_key(key))
-                        .map_err(|e| e.to_string())?;
+                    let config = match get("OPENAI_LLM_MODEL") {
+                        Some(model) => OpenAiReplyConfig { api_key: key, model },
+                        None => OpenAiReplyConfig::from_api_key(key),
+                    };
+                    let client =
+                        OpenAiReplyClient::connect(config).map_err(|e| e.to_string())?;
                     Ok((Box::new(client), false))
                 }
                 None => Ok((Box::new(MockReplyClient), true)),
