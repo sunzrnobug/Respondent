@@ -567,6 +567,12 @@ fn sample_len(frames: u32, channels: u16) -> Result<usize, CaptureError> {
 #[cfg(target_os = "windows")]
 struct OwnedHandle(windows::Win32::Foundation::HANDLE);
 
+// Windows HANDLE values are process-wide and may be signaled or closed from a
+// different thread. OwnedHandle owns exactly one HANDLE and only closes it on
+// drop, so moving that ownership into Tauri-managed session state is safe.
+#[cfg(target_os = "windows")]
+unsafe impl Send for OwnedHandle {}
+
 #[cfg(target_os = "windows")]
 impl OwnedHandle {
     fn create_auto_reset() -> Result<Self, CaptureError> {

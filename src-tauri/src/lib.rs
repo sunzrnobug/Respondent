@@ -9,6 +9,7 @@ pub mod telemetry;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .manage(commands::SessionManager::default())
         .invoke_handler(tauri::generate_handler![
             commands::list_audio_output_devices,
             commands::start_session,
