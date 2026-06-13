@@ -34,7 +34,7 @@ impl MockReplyGeneration {
             .take(3)
             .collect::<Vec<_>>()
             .join(" ");
-        let tokens = vec!["Acknowledged: ".to_string(), summary];
+        let tokens = vec!["已确认：".to_string(), summary];
         let full_text = tokens.concat();
 
         let mut queue = VecDeque::new();

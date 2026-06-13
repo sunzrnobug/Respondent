@@ -28,6 +28,7 @@ fn request() -> ReplyRequest {
         generation_id: "gen-1".into(),
         transcript: "What next?".into(),
         context: vec!["What next?".into()],
+        document_context: None,
     }
 }
 
@@ -50,6 +51,9 @@ fn build_chat_body_has_stream_model_messages() {
     assert_eq!(body["stream"], true);
     let messages = body["messages"].as_array().expect("messages");
     assert_eq!(messages[0]["role"], "system");
+    let system = messages[0]["content"].as_str().unwrap();
+    assert!(system.contains("answer directly"));
+    assert!(system.contains("Do not ask"));
     assert!(messages[1]["content"]
         .as_str()
         .unwrap()
@@ -132,7 +136,7 @@ fn compatible_client_error_does_not_leak_key() {
             _ => None,
         })
         .expect("final");
-    assert!(final_text.contains("Reply generation failed"));
+    assert!(final_text.contains("回复生成失败"));
     assert!(!final_text.contains("secret-key"));
 }
 

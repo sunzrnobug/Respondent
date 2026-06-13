@@ -5,10 +5,15 @@ import type { StopRealtimeSession } from "./mockRealtime";
 export const REALTIME_EVENT_NAME = "realtime-event";
 
 export function isTauriRuntime(): boolean {
-  return (
-    typeof window !== "undefined" &&
-    "__TAURI_INTERNALS__" in (window as unknown as Record<string, unknown>)
-  );
+  if (typeof window === "undefined") return false;
+
+  const internals = (
+    window as unknown as {
+      __TAURI_INTERNALS__?: { invoke?: unknown };
+    }
+  ).__TAURI_INTERNALS__;
+
+  return typeof internals?.invoke === "function";
 }
 
 export async function listenNativeRealtimeEvents(

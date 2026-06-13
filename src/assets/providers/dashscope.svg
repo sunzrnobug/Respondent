@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img" aria-label="DashScope">
+  <defs>
+    <linearGradient id="dashscopeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#624AFF"/>
+      <stop offset="100%" stop-color="#FF6A00"/>
+    </linearGradient>
+  </defs>
+  <rect width="24" height="24" rx="6" fill="url(#dashscopeGrad)"/>
+  <path fill="#fff" d="M7.2 7.5h3.1l2.2 3.4 2.2-3.4h3.1L14.2 12l3.6 4.5h-3.1l-2.2-3.1-2.2 3.1H7.2l3.6-4.5z"/>
+</svg>

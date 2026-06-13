@@ -113,8 +113,8 @@ fn export_helpers_format_markdown_and_plain_text() {
     let text = export_session_text_for_test(&export);
 
     assert!(markdown.contains("## Meeting"));
-    assert!(markdown.contains("[00:00.300] Suggestion: ask about timing"));
-    assert!(text.contains("Transcript: hello"));
+    assert!(markdown.contains("[00:00.300] 建议回复：ask about timing"));
+    assert!(text.contains("转写：hello"));
 }
 
 #[test]

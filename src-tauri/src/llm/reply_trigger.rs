@@ -1,8 +1,13 @@
+use std::sync::{Arc, Mutex};
+
 use crate::asr::client::AsrEvent;
+use crate::docs::format_document_context;
+use crate::docs::store::DocumentStore;
 
 use super::client::ReplyRequest;
 
 const MAX_CONTEXT_TURNS: usize = 6;
+const RETRIEVAL_CONTEXT_TURNS: usize = 3;
 
 /// Endpoint-triggered reply policy (ports the frontend replyEngine): a reply
 /// is requested only on a `Final` that follows an `Endpoint`, carrying a
@@ -17,15 +22,17 @@ pub struct ReplyTrigger {
     endpoint_armed: bool,
     context: Vec<String>,
     generation_counter: u64,
+    doc_store: Arc<Mutex<DocumentStore>>,
 }
 
 impl ReplyTrigger {
-    pub fn new(session_id: impl Into<String>) -> Self {
+    pub fn new(session_id: impl Into<String>, doc_store: Arc<Mutex<DocumentStore>>) -> Self {
         Self {
             session_id: session_id.into(),
             endpoint_armed: false,
             context: Vec::new(),
             generation_counter: 0,
+            doc_store,
         }
     }
 
@@ -43,11 +50,13 @@ impl ReplyTrigger {
                 if self.endpoint_armed {
                     self.endpoint_armed = false;
                     self.generation_counter += 1;
+                    let document_context = self.retrieve_document_context(text);
                     Some(ReplyRequest {
                         session_id: self.session_id.clone(),
                         generation_id: format!("gen-{}", self.generation_counter),
                         transcript: text.clone(),
                         context: self.context.clone(),
+                        document_context,
                     })
                 } else {
                     None
@@ -55,5 +64,123 @@ impl ReplyTrigger {
             }
             AsrEvent::Partial { .. } => None,
         }
+    }
+
+    fn retrieve_document_context(&self, current_transcript: &str) -> Option<String> {
+        let store = match self.doc_store.lock() {
+            Ok(guard) => guard,
+            Err(err) => {
+                eprintln!("[reply_trigger] DocumentStore mutex poisoned: {err}");
+                return None;
+            }
+        };
+        if store.is_empty() {
+            return None;
+        }
+        let query = build_retrieval_query(&self.context, current_transcript);
+        let chunks = store.query(&query, 5);
+        format_document_context(&chunks)
+    }
+}
+
+pub fn build_retrieval_query(context: &[String], transcript: &str) -> String {
+    let recent: Vec<&str> = context
+        .iter()
+        .rev()
+        .take(RETRIEVAL_CONTEXT_TURNS)
+        .rev()
+        .map(|s| s.as_str())
+        .collect();
+    format!("{} {}", recent.join(" "), transcript)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn armed_trigger_with_auth_doc() -> ReplyTrigger {
+        let store = Arc::new(Mutex::new(DocumentStore::default()));
+        store.lock().unwrap().load(
+            "auth.md".into(),
+            "## API Authentication\nUse Bearer token in the Authorization header. The accessToken expires after 1 hour and must be refreshed periodically.\n".into(),
+        );
+        let mut trigger = ReplyTrigger::new("session-1", store);
+        trigger.observe(&AsrEvent::Endpoint {
+            session_id: "session-1".into(),
+            silence_ms: 300,
+            detected_at_ms: 0,
+        });
+        trigger
+    }
+
+    #[test]
+    fn no_request_without_endpoint() {
+        let store = Arc::new(Mutex::new(DocumentStore::default()));
+        let mut trigger = ReplyTrigger::new("s", store);
+        let result = trigger.observe(&AsrEvent::Final {
+            session_id: "s".into(),
+            text: "hello".into(),
+            started_at_ms: 0,
+            ended_at_ms: 100,
+            received_at_ms: 0,
+        });
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn request_after_endpoint_includes_doc_context() {
+        let mut trigger = armed_trigger_with_auth_doc();
+        let request = trigger
+            .observe(&AsrEvent::Final {
+                session_id: "session-1".into(),
+                text: "how do I authenticate the API?".into(),
+                started_at_ms: 0,
+                ended_at_ms: 1000,
+                received_at_ms: 0,
+            })
+            .expect("expected a ReplyRequest");
+        let ctx = request
+            .document_context
+            .expect("document_context should be Some");
+        assert!(
+            ctx.contains("Bearer"),
+            "expected auth content in context: {ctx}"
+        );
+    }
+
+    #[test]
+    fn no_document_context_when_store_empty() {
+        let store = Arc::new(Mutex::new(DocumentStore::default()));
+        let mut trigger = ReplyTrigger::new("s", store);
+        trigger.observe(&AsrEvent::Endpoint {
+            session_id: "s".into(),
+            silence_ms: 300,
+            detected_at_ms: 0,
+        });
+        let request = trigger
+            .observe(&AsrEvent::Final {
+                session_id: "s".into(),
+                text: "authenticate token bearer".into(),
+                started_at_ms: 0,
+                ended_at_ms: 500,
+                received_at_ms: 0,
+            })
+            .unwrap();
+        assert!(request.document_context.is_none());
+    }
+
+    #[test]
+    fn retrieval_query_includes_recent_context() {
+        let context = vec![
+            "first".to_string(),
+            "second".to_string(),
+            "third".to_string(),
+            "fourth".to_string(),
+        ];
+        let q = build_retrieval_query(&context, "current");
+        assert!(!q.contains("first"), "oldest turn should be excluded: {q}");
+        assert!(q.contains("second"));
+        assert!(q.contains("fourth"));
+        assert!(q.contains("current"));
     }
 }

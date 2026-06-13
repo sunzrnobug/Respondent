@@ -51,6 +51,16 @@ impl RecordingHandle {
 
 impl BailianRealtimeTransport for RecordingTransport {
     fn send_json(&mut self, value: Value) -> Result<(), AsrError> {
+        if value["header"]["action"].as_str() == Some("finish-task") {
+            let task_id = value["header"]["task_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            self.recv.lock().expect("recv lock").push_back(json!({
+                "header": {"task_id": task_id, "event": "task-finished", "attributes": {}},
+                "payload": {}
+            }));
+        }
         self.sent_json.lock().expect("json lock").push(value);
         Ok(())
     }
@@ -275,20 +285,128 @@ fn heartbeat_result_is_ignored() {
 }
 
 #[test]
-fn finalize_sends_finish_task_with_same_task_id() {
+fn finalize_sends_finish_task_then_starts_new_task() {
     let (handle, transport) = RecordingTransport::new();
     let mut client =
         BailianRealtimeAsrClient::with_transport("s1".to_string(), config(), Box::new(transport))
             .expect("client");
+    let first_task_id = handle.sent_json()[0]["header"]["task_id"]
+        .as_str()
+        .expect("task id")
+        .to_string();
 
     client.finalize().expect("finish");
 
     let sent = handle.sent_json();
-    assert_eq!(sent.len(), 2);
+    assert_eq!(sent.len(), 3);
     assert_eq!(sent[1]["header"]["action"], "finish-task");
     assert_eq!(sent[1]["header"]["streaming"], "duplex");
-    assert_eq!(sent[1]["header"]["task_id"], sent[0]["header"]["task_id"]);
+    assert_eq!(sent[1]["header"]["task_id"], first_task_id);
     assert_eq!(sent[1]["payload"]["input"], json!({}));
+    assert_eq!(sent[2]["header"]["action"], "run-task");
+    assert_ne!(sent[2]["header"]["task_id"], first_task_id);
+}
+
+#[test]
+fn second_utterance_works_after_finalize() {
+    let (handle, transport) = RecordingTransport::new();
+    let mut client =
+        BailianRealtimeAsrClient::with_transport("s1".to_string(), config(), Box::new(transport))
+            .expect("client");
+    let events = client.events();
+    let first_task_id = handle.sent_json()[0]["header"]["task_id"]
+        .as_str()
+        .expect("task id")
+        .to_string();
+
+    handle.queue(json!({
+        "header": {"task_id": first_task_id, "event": "task-started", "attributes": {}},
+        "payload": {}
+    }));
+    client
+        .push_frame(&mono_16k_frame(vec![1, 2], 100))
+        .expect("first push");
+    assert_eq!(handle.sent_binary().len(), 1);
+
+    client.finalize().expect("finalize first utterance");
+
+    let second_task_id = handle.sent_json()[2]["header"]["task_id"]
+        .as_str()
+        .expect("second task id")
+        .to_string();
+    handle.queue(json!({
+        "header": {"task_id": second_task_id, "event": "task-started", "attributes": {}},
+        "payload": {}
+    }));
+    handle.queue(json!({
+        "header": {"task_id": second_task_id, "event": "result-generated", "attributes": {}},
+        "payload": {
+            "output": {
+                "sentence": {
+                    "begin_time": 0,
+                    "end_time": 500,
+                    "text": "第二轮",
+                    "heartbeat": false,
+                    "sentence_end": true,
+                    "sentence_id": 1,
+                    "words": []
+                }
+            },
+            "usage": null
+        }
+    }));
+
+    client
+        .push_frame(&mono_16k_frame(vec![3, 4], 200))
+        .expect("second push");
+    assert_eq!(handle.sent_binary().len(), 2);
+
+    let collected = events.try_iter().collect::<Vec<_>>();
+    assert!(matches!(
+        &collected[0],
+        AsrEvent::Final { text, .. } if text == "第二轮"
+    ));
+}
+
+#[test]
+fn stale_task_finished_from_previous_task_does_not_block_new_task_audio() {
+    let (handle, transport) = RecordingTransport::new();
+    let mut client =
+        BailianRealtimeAsrClient::with_transport("s1".to_string(), config(), Box::new(transport))
+            .expect("client");
+    let first_task_id = handle.sent_json()[0]["header"]["task_id"]
+        .as_str()
+        .expect("task id")
+        .to_string();
+
+    handle.queue(json!({
+        "header": {"task_id": first_task_id, "event": "task-started", "attributes": {}},
+        "payload": {}
+    }));
+    client
+        .push_frame(&mono_16k_frame(vec![1, 2], 100))
+        .expect("first push");
+    assert_eq!(handle.sent_binary().len(), 1);
+
+    client.finalize().expect("finalize first utterance");
+
+    let second_task_id = handle.sent_json()[2]["header"]["task_id"]
+        .as_str()
+        .expect("second task id")
+        .to_string();
+    handle.queue(json!({
+        "header": {"task_id": first_task_id, "event": "task-finished", "attributes": {}},
+        "payload": {}
+    }));
+    handle.queue(json!({
+        "header": {"task_id": second_task_id, "event": "task-started", "attributes": {}},
+        "payload": {}
+    }));
+
+    client
+        .push_frame(&mono_16k_frame(vec![3, 4], 200))
+        .expect("second push");
+    assert_eq!(handle.sent_binary().len(), 2);
 }
 
 #[test]

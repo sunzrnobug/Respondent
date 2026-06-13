@@ -7,7 +7,7 @@ use serde_json::Value;
 use super::client::{LlmError, ReplyEvent, ReplyGeneration, ReplyPoll, ReplyRequest};
 
 pub const GENERIC_FAILURE_TEXT: &str =
-    "Reply generation failed. Check your API key, model, or network connection.";
+    "回复生成失败。请检查 API 密钥、模型或网络连接。";
 
 /// A stream of parsed SSE JSON values; `[DONE]` or EOF yields Ok(None).
 pub trait SseValueStream: Send {

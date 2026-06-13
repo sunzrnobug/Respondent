@@ -10,7 +10,7 @@ pub struct OutputDevice {
 fn default_output_device() -> OutputDevice {
     OutputDevice {
         id: "default-output".into(),
-        name: "Default output device".into(),
+        name: "默认输出设备".into(),
         is_default: true,
     }
 }
@@ -48,7 +48,7 @@ fn list_output_devices_windows() -> windows::core::Result<Vec<OutputDevice>> {
 
         Ok(vec![OutputDevice {
             id: default_id,
-            name: "Default output device".into(),
+            name: "默认输出设备".into(),
             is_default: true,
         }])
     }

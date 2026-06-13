@@ -26,17 +26,17 @@ function formatTimestamp(atMs: number): string {
 }
 
 function eventLabel(type: SessionExportEvent["type"]): string {
-  if (type === "transcript") return "Transcript";
-  if (type === "suggestion") return "Suggestion";
-  return "System";
+  if (type === "transcript") return "转写";
+  if (type === "suggestion") return "建议回复";
+  return "系统";
 }
 
 function eventLine(event: SessionExportEvent): string {
-  return `[${formatTimestamp(event.atMs)}] ${eventLabel(event.type)}: ${event.text}`;
+  return `[${formatTimestamp(event.atMs)}] ${eventLabel(event.type)}：${event.text}`;
 }
 
 export function exportPlainText(session: SessionExport): string {
-  const header = `${session.title}\nStarted: ${session.startedAt}\nEnded: ${session.endedAt}\n\n`;
+  const header = `${session.title}\n开始：${session.startedAt}\n结束：${session.endedAt}\n\n`;
   const body = session.events.map(eventLine).join("\n");
 
   return `${header}${body}\n`;
@@ -46,10 +46,10 @@ export function exportMarkdown(session: SessionExport): string {
   return [
     `## ${session.title}`,
     "",
-    `- Started: ${session.startedAt}`,
-    `- Ended: ${session.endedAt}`,
+    `- 开始：${session.startedAt}`,
+    `- 结束：${session.endedAt}`,
     "",
-    "### Timeline",
+    "### 时间线",
     "",
     ...session.events.map((event) => `- ${eventLine(event)}`),
     "",

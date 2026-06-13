@@ -14,13 +14,13 @@ const session: SessionExport = {
 describe("session export", () => {
   it("exports Markdown with timestamps and suggestions", () => {
     expect(exportMarkdown(session)).toBe(
-      "## Customer call\n\n- Started: 2026-06-12T08:00:00.000Z\n- Ended: 2026-06-12T08:05:00.000Z\n\n### Timeline\n\n- [00:01.200] Transcript: What is the timeline?\n- [00:02.100] Suggestion: We can deliver the first draft by Friday.\n",
+      "## Customer call\n\n- 开始：2026-06-12T08:00:00.000Z\n- 结束：2026-06-12T08:05:00.000Z\n\n### 时间线\n\n- [00:01.200] 转写：What is the timeline?\n- [00:02.100] 建议回复：We can deliver the first draft by Friday.\n",
     );
   });
 
   it("exports plain text", () => {
     expect(exportPlainText(session)).toBe(
-      "Customer call\nStarted: 2026-06-12T08:00:00.000Z\nEnded: 2026-06-12T08:05:00.000Z\n\n[00:01.200] Transcript: What is the timeline?\n[00:02.100] Suggestion: We can deliver the first draft by Friday.\n",
+      "Customer call\n开始：2026-06-12T08:00:00.000Z\n结束：2026-06-12T08:05:00.000Z\n\n[00:01.200] 转写：What is the timeline?\n[00:02.100] 建议回复：We can deliver the first draft by Friday.\n",
     );
   });
 });

@@ -80,6 +80,7 @@ fn run_session(
     stop: &AtomicBool,
 ) -> Result<(), LlmError> {
     let mut active: Option<Box<dyn ReplyGeneration>> = None;
+    let mut active_gen: Option<(String, String)> = None; // (session_id, generation_id)
 
     loop {
         if stop.load(Ordering::Acquire) {
@@ -91,6 +92,21 @@ fn run_session(
             match asr_events.try_recv() {
                 Ok(event) => {
                     if let Some(request) = trigger.observe(&event) {
+                        if let Some((session_id, generation_id)) = active_gen.take() {
+                            out.send_timeout(
+                                ReplyEvent::Cancelled {
+                                    session_id,
+                                    generation_id,
+                                    received_at_ms: super::streaming::now_ms(),
+                                },
+                                SEND_TIMEOUT,
+                            )
+                            .map_err(|_| LlmError::Closed)?;
+                        }
+                        active_gen = Some((
+                            request.session_id.clone(),
+                            request.generation_id.clone(),
+                        ));
                         active = Some(client.start(request));
                     }
                 }
@@ -109,7 +125,10 @@ fn run_session(
                         .map_err(|_| LlmError::Closed)?;
                 }
                 ReplyPoll::Pending => thread::sleep(PENDING_WAIT),
-                ReplyPoll::Done => active = None,
+                ReplyPoll::Done => {
+                    active = None;
+                    active_gen = None;
+                }
             }
             continue;
         }
@@ -121,6 +140,10 @@ fn run_session(
         match asr_events.recv_timeout(IDLE_WAIT) {
             Ok(event) => {
                 if let Some(request) = trigger.observe(&event) {
+                    active_gen = Some((
+                        request.session_id.clone(),
+                        request.generation_id.clone(),
+                    ));
                     active = Some(client.start(request));
                 }
             }

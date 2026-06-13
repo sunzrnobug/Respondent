@@ -12,6 +12,7 @@ fn request() -> ReplyRequest {
         generation_id: "gen-1".into(),
         transcript: "hi".into(),
         context: vec!["hi".into()],
+        document_context: None,
     }
 }
 

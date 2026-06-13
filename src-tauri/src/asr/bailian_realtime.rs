@@ -3,15 +3,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use serde_json::{json, Map, Value};
-use tungstenite::client::IntoClientRequest;
 use tungstenite::http::HeaderValue;
 use tungstenite::stream::MaybeTlsStream;
-use tungstenite::{connect, Message, WebSocket};
+use tungstenite::{Message, WebSocket};
 use uuid::Uuid;
 
 use crate::audio::frame::AudioFrame;
 
 use super::client::{AsrError, AsrEvent, StreamingAsrClient};
+use super::websocket::connect_with_timeout;
 
 const BAILIAN_REALTIME_URL: &str = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/";
 
@@ -32,21 +32,16 @@ impl WebSocketBailianRealtimeTransport {
             return Err(AsrError::Provider("missing DASHSCOPE_API_KEY".to_string()));
         }
 
-        let mut request = BAILIAN_REALTIME_URL
-            .into_client_request()
-            .map_err(|err| AsrError::Provider(format!("bailian realtime request: {err}")))?;
         let auth = format!("Bearer {}", config.api_key);
         let auth = HeaderValue::from_str(&auth)
             .map_err(|err| AsrError::Provider(format!("bailian realtime auth header: {err}")))?;
-        request.headers_mut().insert("Authorization", auth);
-        request.headers_mut().insert(
-            "user-agent",
-            HeaderValue::from_static("respondent-tauri/0.1"),
-        );
-
-        let (mut socket, _) = connect(request)
-            .map_err(|err| AsrError::Provider(format!("bailian realtime connect: {err}")))?;
-        set_socket_nonblocking(socket.get_mut())?;
+        let socket = connect_with_timeout(BAILIAN_REALTIME_URL, |request| {
+            request.headers_mut().insert("Authorization", auth);
+            request.headers_mut().insert(
+                "user-agent",
+                HeaderValue::from_static("respondent-tauri/0.1"),
+            );
+        })?;
         Ok(Self { socket })
     }
 }
@@ -221,15 +216,25 @@ impl BailianRealtimeAsrClient {
         Ok(())
     }
 
+    fn event_task_id_matches(&self, event: &Value) -> bool {
+        event["header"]["task_id"]
+            .as_str()
+            .is_some_and(|id| id == self.task_id)
+    }
+
     fn handle_provider_event(&mut self, event: Value) -> Result<(), AsrError> {
         match event["header"]["event"].as_str() {
             Some("task-started") => {
-                self.task_started = true;
+                if self.event_task_id_matches(&event) {
+                    self.task_started = true;
+                }
                 Ok(())
             }
             Some("result-generated") => self.handle_result_generated(event),
             Some("task-finished") => {
-                self.task_finished = true;
+                if self.event_task_id_matches(&event) {
+                    self.task_finished = true;
+                }
                 Ok(())
             }
             Some("task-failed") => {
@@ -293,6 +298,19 @@ impl BailianRealtimeAsrClient {
         }
         Ok(())
     }
+
+    fn wait_for_task_finished(&mut self) -> Result<(), AsrError> {
+        use std::time::{Duration, Instant};
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !self.task_finished {
+            if Instant::now() > deadline {
+                break;
+            }
+            self.drain_provider_events()?;
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Ok(())
+    }
 }
 
 impl StreamingAsrClient for BailianRealtimeAsrClient {
@@ -322,41 +340,29 @@ impl StreamingAsrClient for BailianRealtimeAsrClient {
 
     fn finalize(&mut self) -> Result<(), AsrError> {
         self.drain_provider_events()?;
-        if self.task_finished {
-            return Ok(());
+        if !self.task_finished {
+            self.transport.send_json(json!({
+                "header": {
+                    "action": "finish-task",
+                    "task_id": self.task_id,
+                    "streaming": "duplex",
+                },
+                "payload": {
+                    "input": {},
+                },
+            }))?;
+            self.wait_for_task_finished()?;
         }
-        self.transport.send_json(json!({
-            "header": {
-                "action": "finish-task",
-                "task_id": self.task_id,
-                "streaming": "duplex",
-            },
-            "payload": {
-                "input": {},
-            },
-        }))?;
-        self.drain_provider_events()
+        self.task_id = Uuid::new_v4().to_string();
+        self.task_started = false;
+        self.task_finished = false;
+        self.send_run_task()
     }
 }
 
 impl Drop for BailianRealtimeAsrClient {
     fn drop(&mut self) {
         let _ = self.transport.close();
-    }
-}
-
-fn set_socket_nonblocking(stream: &mut MaybeTlsStream<TcpStream>) -> Result<(), AsrError> {
-    match stream {
-        MaybeTlsStream::Plain(stream) => stream
-            .set_nonblocking(true)
-            .map_err(|err| AsrError::Provider(format!("bailian realtime nonblocking: {err}"))),
-        MaybeTlsStream::NativeTls(stream) => stream
-            .get_ref()
-            .set_nonblocking(true)
-            .map_err(|err| AsrError::Provider(format!("bailian realtime nonblocking: {err}"))),
-        _ => Err(AsrError::Provider(
-            "bailian realtime nonblocking: unsupported tls stream".to_string(),
-        )),
     }
 }
 

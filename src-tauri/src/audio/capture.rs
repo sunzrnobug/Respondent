@@ -3,6 +3,7 @@ use std::sync::{
     Arc,
 };
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
 use thiserror::Error;
@@ -18,6 +19,8 @@ pub enum CaptureError {
     Unsupported(String),
     #[error("capture thread join failed: {0}")]
     ThreadJoin(String),
+    #[error("capture startup timed out")]
+    StartupTimeout,
     #[cfg(target_os = "windows")]
     #[error("windows audio error: {0}")]
     Com(#[from] windows::core::Error),
@@ -200,6 +203,8 @@ fn start_platform_capture(_device_id: &str) -> Result<LoopbackCapture, CaptureEr
 fn start_platform_capture(device_id: &str) -> Result<LoopbackCapture, CaptureError> {
     use crossbeam_channel::bounded as bounded_once;
 
+    const STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
+
     let (sender, receiver) = bounded(128);
     let dropped_frames = Arc::new(AtomicU64::new(0));
     let stop_flag = Arc::new(AtomicBool::new(false));
@@ -226,7 +231,7 @@ fn start_platform_capture(device_id: &str) -> Result<LoopbackCapture, CaptureErr
         })
         .map_err(|error| CaptureError::ThreadJoin(error.to_string()))?;
 
-    match ready_rx.recv() {
+    match ready_rx.recv_timeout(STARTUP_TIMEOUT) {
         Ok(Ok(())) => Ok(LoopbackCapture {
             sender,
             receiver,
@@ -235,15 +240,28 @@ fn start_platform_capture(device_id: &str) -> Result<LoopbackCapture, CaptureErr
             thread_handle: Some(thread_handle),
             wake_event: Some(wake_event),
         }),
-        Ok(Err(_)) | Err(_) => match thread_handle.join() {
-            Ok(result) => match result {
-                Ok(()) => Err(CaptureError::ThreadJoin(
-                    "capture thread exited before signalling startup".into(),
-                )),
-                Err(error) => Err(error),
-            },
-            Err(payload) => Err(CaptureError::ThreadJoin(panic_payload_to_string(payload))),
-        },
+        Ok(Err(_)) | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+            match thread_handle.join() {
+                Ok(result) => match result {
+                    Ok(()) => Err(CaptureError::ThreadJoin(
+                        "capture thread exited before signalling startup".into(),
+                    )),
+                    Err(error) => Err(error),
+                },
+                Err(payload) => Err(CaptureError::ThreadJoin(panic_payload_to_string(payload))),
+            }
+        }
+        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+            stop_flag.store(true, Ordering::Release);
+            let _ = wake_event.signal();
+            let _ = thread::Builder::new()
+                .name("wasapi-loopback-startup-cleanup".into())
+                .spawn(move || {
+                    let _keep_event_alive = wake_event;
+                    let _ = thread_handle.join();
+                });
+            Err(CaptureError::StartupTimeout)
+        }
     }
 }
 

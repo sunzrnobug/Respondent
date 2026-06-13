@@ -21,16 +21,17 @@ fn responses_body_includes_stream_model_context_and_current_turn() {
             generation_id: "gen-1".into(),
             transcript: "What should we do next?".into(),
             context: vec!["Earlier context".into(), "What should we do next?".into()],
+            document_context: None,
         },
     );
 
     assert_eq!(body["model"], "gpt-5.4-mini");
     assert_eq!(body["stream"], true);
     let input = body["input"].as_array().expect("input messages");
-    assert!(input[0]["content"]
-        .as_str()
-        .unwrap()
-        .contains("live meeting"));
+    let system = input[0]["content"].as_str().unwrap();
+    assert!(system.contains("live meeting"));
+    assert!(system.contains("answer directly"));
+    assert!(system.contains("Do not ask"));
     assert!(input[1]["content"]
         .as_str()
         .unwrap()
@@ -89,7 +90,7 @@ fn openai_reply_reports_provider_error_without_leaking_api_key() {
         })
         .expect("final error event");
 
-    assert!(final_text.contains("Reply generation failed"));
+    assert!(final_text.contains("回复生成失败"));
     assert!(!final_text.contains("secret-key"));
 }
 
@@ -99,6 +100,7 @@ fn request() -> ReplyRequest {
         generation_id: "gen-1".into(),
         transcript: "What should we do next?".into(),
         context: vec!["What should we do next?".into()],
+        document_context: None,
     }
 }
 

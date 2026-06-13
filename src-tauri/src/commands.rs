@@ -22,11 +22,16 @@ use crate::llm::client::{ReplyEvent, StreamingReplyClient};
 use crate::llm::mock::MockReplyClient;
 use crate::llm::openai_compatible::{OpenAiCompatibleReplyClient, ProviderConfig};
 use crate::llm::openai_responses::{OpenAiReplyClient, OpenAiReplyConfig};
+use crate::docs::store::{DocumentStore, DocumentSummary};
 use crate::llm::reply_trigger::ReplyTrigger;
 use crate::llm::session::ReplySession;
 use crate::provider_config::{
-    clean_opt, load_provider_settings, save_provider_settings, settings_file_path,
-    AsrProviderSettings, LlmProviderSettings, ProviderConfigSummary, ProviderSettings,
+    activate_provider_profile as activate_profile_in_store,
+    clean_opt, delete_provider_profile as delete_profile_in_store,
+    load_profile_store, profiles_file_path, save_profile_store,
+    save_provider_settings, settings_file_path, upsert_provider_profile,
+    AsrProviderSettings, LlmProviderSettings, ProviderConfigSummary, ProviderProfileStore,
+    ProviderProfilesResponse, ProviderSettings,
 };
 use crate::session::db::{EventInsert, SessionDb};
 use crate::session::export::SessionExport;
@@ -112,27 +117,40 @@ impl PersistentSessionDb {
 
 #[derive(Clone)]
 pub struct ProviderConfigStore {
-    path: PathBuf,
+    profiles_path: PathBuf,
+    legacy_settings_path: PathBuf,
 }
 
 impl ProviderConfigStore {
     pub fn open(app: &tauri::AppHandle) -> Result<Self, String> {
         Ok(Self {
-            path: settings_file_path(app)?,
+            profiles_path: profiles_file_path(app)?,
+            legacy_settings_path: settings_file_path(app)?,
         })
     }
 
     #[cfg(test)]
-    pub fn open_path(path: PathBuf) -> Self {
-        Self { path }
+    pub fn open_paths(profiles_path: PathBuf, legacy_settings_path: PathBuf) -> Self {
+        Self {
+            profiles_path,
+            legacy_settings_path,
+        }
+    }
+
+    fn load_store(&self) -> Result<ProviderProfileStore, String> {
+        load_profile_store(&self.profiles_path, &self.legacy_settings_path)
+    }
+
+    fn save_store(&self, store: &ProviderProfileStore) -> Result<(), String> {
+        save_profile_store(&self.profiles_path, store)
     }
 
     fn load(&self) -> Result<ProviderSettings, String> {
-        load_provider_settings(&self.path)
+        Ok(self.load_store()?.active_settings())
     }
 
     fn save(&self, settings: &ProviderSettings) -> Result<(), String> {
-        save_provider_settings(&self.path, settings)
+        save_provider_settings(&self.legacy_settings_path, settings)
     }
 }
 
@@ -149,6 +167,7 @@ pub fn start_session(
     provider_config: tauri::State<'_, ProviderConfigStore>,
     title: String,
     output_device_id: String,
+    endpointer_silence_ms: Option<u32>,
 ) -> Result<String, String> {
     validate_start_session(&title, &output_device_id)?;
     let provider_settings = provider_config.load()?;
@@ -163,6 +182,7 @@ pub fn start_session(
         output_device_id,
         db.inner().clone(),
         provider_settings,
+        endpointer_silence_ms,
     );
     let runtime = match runtime_result {
         Ok(runtime) => runtime,
@@ -181,7 +201,7 @@ pub fn start_session(
     }
     emit_status(
         &app,
-        SystemStatusEvent::info(Some(session_id.clone()), "Native realtime session started"),
+        SystemStatusEvent::info(Some(session_id.clone()), "原生实时会话已启动"),
     );
     Ok(session_id)
 }
@@ -229,10 +249,37 @@ pub fn export_session_text(
 }
 
 #[tauri::command]
+pub fn save_markdown_file(
+    app: tauri::AppHandle,
+    filename: String,
+    content: String,
+) -> Result<String, String> {
+    let export_dir = app
+        .path()
+        .download_dir()
+        .or_else(|_| app.path().document_dir())
+        .or_else(|_| app.path().app_data_dir())
+        .map_err(|err| format!("Resolve export directory failed: {err}"))?;
+    std::fs::create_dir_all(&export_dir)
+        .map_err(|err| format!("Create export directory failed: {err}"))?;
+
+    let path = next_available_markdown_path(export_dir, &sanitize_markdown_filename(&filename));
+    std::fs::write(&path, content).map_err(|err| format!("Write markdown failed: {err}"))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
 pub fn get_provider_config(
     state: tauri::State<'_, ProviderConfigStore>,
 ) -> Result<ProviderConfigSummary, String> {
     Ok(state.load()?.summary())
+}
+
+#[tauri::command]
+pub fn list_provider_profiles(
+    state: tauri::State<'_, ProviderConfigStore>,
+) -> Result<ProviderProfilesResponse, String> {
+    Ok(state.load_store()?.response())
 }
 
 #[tauri::command]
@@ -247,23 +294,98 @@ pub fn save_provider_config(
 }
 
 #[tauri::command]
+pub fn save_provider_profile(
+    state: tauri::State<'_, ProviderConfigStore>,
+    name: String,
+    profile_id: Option<String>,
+    payload: ProviderSettings,
+) -> Result<ProviderProfilesResponse, String> {
+    let mut store = state.load_store()?;
+    upsert_provider_profile(
+        &mut store,
+        profile_id,
+        &name,
+        payload,
+        merge_provider_settings,
+    )?;
+    state.save_store(&store)?;
+    Ok(store.response())
+}
+
+#[tauri::command]
+pub fn activate_provider_profile(
+    state: tauri::State<'_, ProviderConfigStore>,
+    profile_id: String,
+) -> Result<ProviderProfilesResponse, String> {
+    let mut store = state.load_store()?;
+    activate_profile_in_store(&mut store, &profile_id)?;
+    state.save_store(&store)?;
+    Ok(store.response())
+}
+
+#[tauri::command]
+pub fn delete_provider_profile(
+    state: tauri::State<'_, ProviderConfigStore>,
+    profile_id: String,
+) -> Result<ProviderProfilesResponse, String> {
+    let mut store = state.load_store()?;
+    delete_profile_in_store(&mut store, &profile_id)?;
+    state.save_store(&store)?;
+    Ok(store.response())
+}
+
+#[tauri::command]
 pub fn clear_provider_config(
     state: tauri::State<'_, ProviderConfigStore>,
     scope: Option<String>,
 ) -> Result<ProviderConfigSummary, String> {
-    let mut settings = state.load()?;
+    let mut store = state.load_store()?;
+    let active_id = store.active_profile_id.clone();
+    let Some(active_id) = active_id else {
+        return Ok(ProviderSettings::default().summary());
+    };
+    let Some(active_profile) = store
+        .profiles
+        .iter_mut()
+        .find(|profile| profile.id == active_id)
+    else {
+        return Ok(ProviderSettings::default().summary());
+    };
+
     match scope
         .as_deref()
         .map(str::trim)
         .map(str::to_ascii_lowercase)
         .as_deref()
     {
-        Some("llm") => settings.llm = None,
-        Some("asr") => settings.asr = None,
-        _ => settings = ProviderSettings::default(),
+        Some("llm") => active_profile.settings.llm = None,
+        Some("asr") => active_profile.settings.asr = None,
+        _ => active_profile.settings = ProviderSettings::default(),
     }
-    state.save(&settings)?;
-    Ok(settings.summary())
+    active_profile.updated_at_ms = chrono::Utc::now().timestamp_millis();
+    state.save_store(&store)?;
+    Ok(store.active_settings().summary())
+}
+
+#[tauri::command]
+pub fn load_document(
+    state: tauri::State<'_, Arc<Mutex<DocumentStore>>>,
+    name: String,
+    content: String,
+) -> DocumentSummary {
+    state.lock().unwrap().load(name, content)
+}
+
+#[tauri::command]
+pub fn unload_document(state: tauri::State<'_, Arc<Mutex<DocumentStore>>>, name: String) {
+    state.lock().unwrap().unload(&name);
+}
+
+#[tauri::command]
+pub fn list_documents(
+    state: tauri::State<'_, Arc<Mutex<DocumentStore>>>,
+) -> Vec<DocumentSummary> {
+    state.lock().unwrap().list()
 }
 
 pub fn merge_provider_settings(
@@ -287,17 +409,17 @@ pub fn end_session_for_test(session_id: String) -> Result<(), String> {
 
 fn validate_start_session(title: &str, output_device_id: &str) -> Result<(), String> {
     if title.trim().is_empty() {
-        return Err("Session title cannot be empty".into());
+        return Err("会话标题不能为空".into());
     }
     if output_device_id.trim().is_empty() {
-        return Err("Output device id cannot be empty".into());
+        return Err("输出设备 ID 不能为空".into());
     }
     Ok(())
 }
 
 fn validate_session_id(session_id: &str) -> Result<(), String> {
     if session_id.trim().is_empty() {
-        return Err("Session id cannot be empty".into());
+        return Err("会话 ID 不能为空".into());
     }
     Ok(())
 }
@@ -321,27 +443,27 @@ impl SessionRuntime {
         output_device_id: String,
         db: PersistentSessionDb,
         provider_settings: ProviderSettings,
+        endpointer_silence_ms: Option<u32>,
     ) -> Result<Self, String> {
-        eprintln!("[runtime] start: device={output_device_id:?}");
         let capture = LoopbackCapture::start(&output_device_id).map_err(|err| err.to_string())?;
-        eprintln!("[runtime] capture started");
         let frames = capture.receiver();
         let (asr_client, using_mock_asr) = build_asr_client(&session_id, &provider_settings)?;
-        eprintln!("[runtime] asr provider mock={using_mock_asr}");
+        let silence_ms = endpointer_silence_ms.unwrap_or(300).clamp(300, 3000);
         let transcription = TranscriptionSession::start(
             session_id.clone(),
             frames,
             asr_client,
-            EnergyEndpointer::with_defaults(),
+            EnergyEndpointer::new(0.01, silence_ms),
         );
         let asr_events = transcription.events();
         let (reply_asr_tx, reply_asr_rx) = unbounded::<AsrEvent>();
         let asr_bridge = spawn_asr_bridge(app.clone(), asr_events, reply_asr_tx, db.clone());
         let (reply_client, using_mock_llm) = build_reply_client(&provider_settings)?;
+        let doc_store = app.state::<Arc<Mutex<DocumentStore>>>().inner().clone();
         let reply = ReplySession::start(
             reply_asr_rx,
             reply_client,
-            ReplyTrigger::new(session_id.clone()),
+            ReplyTrigger::new(session_id.clone(), doc_store),
         );
         let reply_bridge = spawn_reply_bridge(app.clone(), reply.events(), db);
 
@@ -350,7 +472,7 @@ impl SessionRuntime {
                 &app,
                 SystemStatusEvent::info(
                     Some(session_id.clone()),
-                    "OPENAI_API_KEY not set; using mock ASR provider",
+                    "未设置 OPENAI_API_KEY，正在使用演示 ASR 服务商",
                 ),
             );
         }
@@ -359,7 +481,7 @@ impl SessionRuntime {
                 &app,
                 SystemStatusEvent::info(
                     Some(session_id),
-                    "No LLM provider configured; using mock LLM provider",
+                    "未配置 LLM 服务商，正在使用演示 LLM 服务商",
                 ),
             );
         }
@@ -890,19 +1012,19 @@ fn persist_reply_event(db: &PersistentSessionDb, event: &ReplyEvent) {
 }
 
 fn format_session_markdown(export: &SessionExport) -> String {
-    let ended_at = export.ended_at.as_deref().unwrap_or("In progress");
+    let ended_at = export.ended_at.as_deref().unwrap_or("进行中");
     let mut lines = vec![
         format!("## {}", export.title),
         String::new(),
-        format!("- Started: {}", export.started_at),
-        format!("- Ended: {ended_at}"),
+        format!("- 开始：{}", export.started_at),
+        format!("- 结束：{ended_at}"),
         String::new(),
-        "### Timeline".to_string(),
+        "### 时间线".to_string(),
         String::new(),
     ];
     lines.extend(export.events.iter().map(|event| {
         format!(
-            "- [{}] {}: {}",
+            "- [{}] {}：{}",
             format_timestamp(event.ended_at_ms),
             event_label(&event.event_type),
             event.text
@@ -913,16 +1035,16 @@ fn format_session_markdown(export: &SessionExport) -> String {
 }
 
 fn format_session_text(export: &SessionExport) -> String {
-    let ended_at = export.ended_at.as_deref().unwrap_or("In progress");
+    let ended_at = export.ended_at.as_deref().unwrap_or("进行中");
     let mut lines = vec![
         export.title.clone(),
-        format!("Started: {}", export.started_at),
-        format!("Ended: {ended_at}"),
+        format!("开始：{}", export.started_at),
+        format!("结束：{ended_at}"),
         String::new(),
     ];
     lines.extend(export.events.iter().map(|event| {
         format!(
-            "[{}] {}: {}",
+            "[{}] {}：{}",
             format_timestamp(event.ended_at_ms),
             event_label(&event.event_type),
             event.text
@@ -934,9 +1056,9 @@ fn format_session_text(export: &SessionExport) -> String {
 
 fn event_label(event_type: &str) -> &'static str {
     match event_type {
-        "transcript" => "Transcript",
-        "suggestion" => "Suggestion",
-        _ => "System",
+        "transcript" => "转写",
+        "suggestion" => "建议回复",
+        _ => "系统",
     }
 }
 
@@ -946,6 +1068,46 @@ fn format_timestamp(ms: i64) -> String {
     let seconds = (ms % 60_000) / 1_000;
     let milliseconds = ms % 1_000;
     format!("{minutes:02}:{seconds:02}.{milliseconds:03}")
+}
+
+fn sanitize_markdown_filename(filename: &str) -> String {
+    let sanitized = filename
+        .trim()
+        .chars()
+        .map(|ch| match ch {
+            '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
+            ch if ch.is_control() => '-',
+            ch => ch,
+        })
+        .collect::<String>()
+        .trim_matches([' ', '.'])
+        .to_string();
+    let stem = if sanitized.is_empty() {
+        "会话导出".to_string()
+    } else {
+        sanitized
+    };
+    if stem.to_lowercase().ends_with(".md") {
+        stem
+    } else {
+        format!("{stem}.md")
+    }
+}
+
+fn next_available_markdown_path(dir: PathBuf, filename: &str) -> PathBuf {
+    let initial = dir.join(filename);
+    if !initial.exists() {
+        return initial;
+    }
+
+    let stem = filename.strip_suffix(".md").unwrap_or(filename);
+    for index in 2..10_000 {
+        let candidate = dir.join(format!("{stem} ({index}).md"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    dir.join(format!("{stem}-{}.md", now_ms()))
 }
 
 pub fn export_session_markdown_for_test(export: &SessionExport) -> String {

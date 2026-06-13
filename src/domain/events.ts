@@ -47,6 +47,13 @@ export type ReplyFinalEvent = {
   receivedAtMs: number;
 };
 
+export type ReplyCancelledEvent = {
+  type: "reply.cancelled";
+  sessionId: string;
+  generationId: string;
+  receivedAtMs: number;
+};
+
 export type SystemEvent = {
   type: "system.status";
   sessionId?: string;
@@ -62,6 +69,7 @@ export type RealtimeEvent =
   | ReplyStartedEvent
   | ReplyTokenEvent
   | ReplyFinalEvent
+  | ReplyCancelledEvent
   | SystemEvent;
 
 const allowedTypes = new Set<RealtimeEvent["type"]>([
@@ -71,6 +79,7 @@ const allowedTypes = new Set<RealtimeEvent["type"]>([
   "reply.started",
   "reply.token",
   "reply.final",
+  "reply.cancelled",
   "system.status",
 ]);
 
@@ -136,6 +145,11 @@ export function isRealtimeEvent(value: unknown): value is RealtimeEvent {
     case "reply.final":
       return (
         hasStringFields(candidate, ["sessionId", "generationId", "text"]) &&
+        hasNumberFields(candidate, ["receivedAtMs"])
+      );
+    case "reply.cancelled":
+      return (
+        hasStringFields(candidate, ["sessionId", "generationId"]) &&
         hasNumberFields(candidate, ["receivedAtMs"])
       );
     case "system.status":

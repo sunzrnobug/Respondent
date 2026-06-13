@@ -5,3 +5,4 @@ pub mod mock;
 pub mod openai_realtime;
 pub mod session;
 pub mod siliconflow_file;
+pub mod websocket;
