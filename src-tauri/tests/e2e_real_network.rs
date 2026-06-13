@@ -67,7 +67,10 @@ fn real_siliconflow_llm_smoke_when_api_key_is_present() {
         !final_text.contains("Reply generation failed"),
         "SiliconFlow request failed (generic failure final returned)"
     );
-    assert!(token_count > 0, "expected streamed tokens, not just a final");
+    assert!(
+        token_count > 0,
+        "expected streamed tokens, not just a final"
+    );
 }
 
 #[test]
@@ -155,7 +158,10 @@ fn real_capture_to_siliconflow_transcription() {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "FunAudioLLM/SenseVoiceSmall".to_string());
-    eprintln!("[siliconflow-asr] model = {model}, wav_bytes = {}", wav.len());
+    eprintln!(
+        "[siliconflow-asr] model = {model}, wav_bytes = {}",
+        wav.len()
+    );
     let transport = ReqwestTranscriptionTransport::default();
     let config = SiliconFlowFileConfig {
         base_url: "https://api.siliconflow.cn/v1".into(),

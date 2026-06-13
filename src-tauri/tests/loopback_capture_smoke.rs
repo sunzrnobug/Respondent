@@ -24,5 +24,8 @@ fn loopback_capture_receives_non_silent_16khz_frames() {
     }
 
     capture.stop().expect("stop capture");
-    assert!(saw_non_silent, "play system audio while running this ignored test");
+    assert!(
+        saw_non_silent,
+        "play system audio while running this ignored test"
+    );
 }

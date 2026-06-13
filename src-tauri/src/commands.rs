@@ -9,6 +9,7 @@ use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender};
 use serde::Serialize;
 use tauri::{Emitter, Manager};
 
+use crate::asr::bailian_realtime::{BailianRealtimeAsrClient, BailianRealtimeConfig};
 use crate::asr::client::{AsrEvent, StreamingAsrClient};
 use crate::asr::endpointer::EnergyEndpointer;
 use crate::asr::mock::MockAsrClient;
@@ -26,7 +27,7 @@ use crate::llm::session::ReplySession;
 use crate::session::db::{EventInsert, SessionDb};
 use crate::session::export::SessionExport;
 
-pub const REALTIME_EVENT_NAME: &str = "realtime.event";
+pub const REALTIME_EVENT_NAME: &str = "realtime-event";
 const BRIDGE_WAIT: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Serialize)]
@@ -239,9 +240,12 @@ impl SessionRuntime {
         output_device_id: String,
         db: PersistentSessionDb,
     ) -> Result<Self, String> {
+        eprintln!("[runtime] start: device={output_device_id:?}");
         let capture = LoopbackCapture::start(&output_device_id).map_err(|err| err.to_string())?;
+        eprintln!("[runtime] capture started");
         let frames = capture.receiver();
         let (asr_client, using_mock_asr) = build_asr_client(&session_id)?;
+        eprintln!("[runtime] asr provider mock={using_mock_asr}");
         let transcription = TranscriptionSession::start(
             session_id.clone(),
             frames,
@@ -309,7 +313,11 @@ pub fn resolve_asr_client(
         .map(|p| p.trim().to_lowercase())
         .filter(|p| !p.is_empty())
         .unwrap_or_else(|| "openai_realtime".to_string());
-    let get = |key: &str| env.get(key).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    let get = |key: &str| {
+        env.get(key)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
 
     match provider.as_str() {
         "siliconflow_file" => match get("SILICONFLOW_API_KEY") {
@@ -338,13 +346,49 @@ pub fn resolve_asr_client(
             }
             None => Ok((Box::new(MockAsrClient::new(session_id)), true)),
         },
+        "bailian_realtime" => match get("DASHSCOPE_API_KEY") {
+            Some(api_key) => {
+                let mut config = BailianRealtimeConfig::from_api_key(api_key);
+                if let Some(model) = get("DASHSCOPE_ASR_MODEL") {
+                    config.model = model;
+                }
+                if let Some(language_hint) = get("DASHSCOPE_ASR_LANGUAGE_HINT") {
+                    config.language_hint = Some(language_hint);
+                }
+                if let Some(max_sentence_silence) = get("DASHSCOPE_ASR_MAX_SENTENCE_SILENCE_MS") {
+                    config.max_sentence_silence_ms = max_sentence_silence.parse::<u32>().ok();
+                }
+                if let Some(heartbeat) = get("DASHSCOPE_ASR_HEARTBEAT") {
+                    config.heartbeat = matches!(
+                        heartbeat.to_ascii_lowercase().as_str(),
+                        "1" | "true" | "yes" | "on"
+                    );
+                }
+                let client = BailianRealtimeAsrClient::connect(session_id.to_string(), config)
+                    .map_err(|e| e.to_string())?;
+                Ok((Box::new(client), false))
+            }
+            None => Ok((Box::new(MockAsrClient::new(session_id)), true)),
+        },
         _ => Ok((Box::new(MockAsrClient::new(session_id)), true)),
     }
 }
 
 pub fn resolve_asr_provider_name(session_id: &str, env: &HashMap<String, String>) -> &'static str {
-    let (client, _) = resolve_asr_client(session_id, env).expect("resolve asr client");
-    client.name()
+    let _ = session_id;
+    let provider = env
+        .get("ASR_PROVIDER")
+        .map(|p| p.trim().to_lowercase())
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| "openai_realtime".to_string());
+    let has = |key: &str| env.get(key).is_some_and(|v| !v.trim().is_empty());
+
+    match provider.as_str() {
+        "siliconflow_file" if has("SILICONFLOW_API_KEY") => "siliconflow-file-asr",
+        "openai_realtime" if has("OPENAI_API_KEY") => "openai-realtime-asr",
+        "bailian_realtime" if has("DASHSCOPE_API_KEY") => "bailian-realtime-asr",
+        _ => "mock-asr",
+    }
 }
 
 /// Build the reply client from an env-like map. Returns (client, using_mock).
@@ -357,13 +401,26 @@ pub fn resolve_reply_client(
         .filter(|p| !p.is_empty())
         .unwrap_or_else(|| "openai".to_string());
 
-    let get = |key: &str| env.get(key).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    let get = |key: &str| {
+        env.get(key)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
 
-    let compatible = |base_default: &str, key: Option<String>, model_default: &str, base_key: &str, model_key: &str| -> Option<ProviderConfig> {
+    let compatible = |base_default: &str,
+                      key: Option<String>,
+                      model_default: &str,
+                      base_key: &str,
+                      model_key: &str|
+     -> Option<ProviderConfig> {
         let api_key = key?;
         let base_url = get(base_key).unwrap_or_else(|| base_default.to_string());
         let model = get(model_key).unwrap_or_else(|| model_default.to_string());
-        Some(ProviderConfig { base_url, api_key, model })
+        Some(ProviderConfig {
+            base_url,
+            api_key,
+            model,
+        })
     };
 
     let cfg: Option<ProviderConfig> = match provider.as_str() {
@@ -371,11 +428,13 @@ pub fn resolve_reply_client(
             return match get("OPENAI_API_KEY") {
                 Some(key) => {
                     let config = match get("OPENAI_LLM_MODEL") {
-                        Some(model) => OpenAiReplyConfig { api_key: key, model },
+                        Some(model) => OpenAiReplyConfig {
+                            api_key: key,
+                            model,
+                        },
                         None => OpenAiReplyConfig::from_api_key(key),
                     };
-                    let client =
-                        OpenAiReplyClient::connect(config).map_err(|e| e.to_string())?;
+                    let client = OpenAiReplyClient::connect(config).map_err(|e| e.to_string())?;
                     Ok((Box::new(client), false))
                 }
                 None => Ok((Box::new(MockReplyClient), true)),
@@ -403,8 +462,16 @@ pub fn resolve_reply_client(
             "SILICONFLOW_LLM_MODEL",
         ),
         "openai_compatible" => {
-            match (get("OPENAI_COMPATIBLE_API_KEY"), get("OPENAI_COMPATIBLE_BASE_URL"), get("OPENAI_COMPATIBLE_MODEL")) {
-                (Some(api_key), Some(base_url), Some(model)) => Some(ProviderConfig { base_url, api_key, model }),
+            match (
+                get("OPENAI_COMPATIBLE_API_KEY"),
+                get("OPENAI_COMPATIBLE_BASE_URL"),
+                get("OPENAI_COMPATIBLE_MODEL"),
+            ) {
+                (Some(api_key), Some(base_url), Some(model)) => Some(ProviderConfig {
+                    base_url,
+                    api_key,
+                    model,
+                }),
                 _ => None,
             }
         }

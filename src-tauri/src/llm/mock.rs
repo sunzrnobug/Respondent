@@ -1,8 +1,6 @@
 use std::collections::VecDeque;
 
-use super::client::{
-    ReplyEvent, ReplyGeneration, ReplyPoll, ReplyRequest, StreamingReplyClient,
-};
+use super::client::{ReplyEvent, ReplyGeneration, ReplyPoll, ReplyRequest, StreamingReplyClient};
 
 pub struct MockReplyClient;
 

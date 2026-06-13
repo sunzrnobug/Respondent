@@ -61,7 +61,7 @@ export default function App() {
       } catch (error) {
         stopNativeEvents?.();
         const message =
-          error instanceof Error ? error.message : "Failed to start session";
+          error instanceof Error ? error.message : String(error);
         setSession({
           ...createInitialSessionState("idle"),
           status: "idle",
@@ -118,6 +118,7 @@ export default function App() {
         <p className={session.liveSubtitle ? "subtitle partial" : "subtitle"}>
           {session.liveSubtitle ||
             session.transcript.at(-1) ||
+            session.systemMessages.at(-1) ||
             "Start a session to see live subtitles."}
         </p>
       </section>

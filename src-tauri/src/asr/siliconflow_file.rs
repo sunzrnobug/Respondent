@@ -22,8 +22,15 @@ pub trait TranscriptionTransport: Send + Sync {
 
 fn truncate(text: &str) -> String {
     let t = text.trim();
-    if t.len() <= 240 { return t.to_string(); }
-    let b = t.char_indices().map(|(i, _)| i).take_while(|i| *i <= 240).last().unwrap_or(0);
+    if t.len() <= 240 {
+        return t.to_string();
+    }
+    let b = t
+        .char_indices()
+        .map(|(i, _)| i)
+        .take_while(|i| *i <= 240)
+        .last()
+        .unwrap_or(0);
     format!("{}...", &t[..b])
 }
 
@@ -31,7 +38,11 @@ pub struct ReqwestTranscriptionTransport {
     client: reqwest::blocking::Client,
 }
 impl Default for ReqwestTranscriptionTransport {
-    fn default() -> Self { Self { client: reqwest::blocking::Client::new() } }
+    fn default() -> Self {
+        Self {
+            client: reqwest::blocking::Client::new(),
+        }
+    }
 }
 impl TranscriptionTransport for ReqwestTranscriptionTransport {
     fn transcribe(&self, config: &SiliconFlowFileConfig, wav: &[u8]) -> Result<String, AsrError> {
@@ -52,7 +63,10 @@ impl TranscriptionTransport for ReqwestTranscriptionTransport {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().unwrap_or_default();
-            return Err(AsrError::Provider(format!("transcription http {status}: {}", truncate(&body))));
+            return Err(AsrError::Provider(format!(
+                "transcription http {status}: {}",
+                truncate(&body)
+            )));
         }
         let value: Value = response
             .json()
@@ -74,7 +88,11 @@ pub struct SiliconFlowFileAsrClient {
 
 impl SiliconFlowFileAsrClient {
     pub fn connect(session_id: String, config: SiliconFlowFileConfig) -> Result<Self, AsrError> {
-        Self::with_transport(session_id, config, Arc::new(ReqwestTranscriptionTransport::default()))
+        Self::with_transport(
+            session_id,
+            config,
+            Arc::new(ReqwestTranscriptionTransport::default()),
+        )
     }
 
     pub fn with_transport(
@@ -129,12 +147,14 @@ impl StreamingAsrClient for SiliconFlowFileAsrClient {
         }
         let started_at_ms = self.started_at_ms.unwrap_or(0);
         let ended_at_ms = self.last_ended_at_ms;
+        eprintln!("[sf-asr] finalize: {} samples", self.buffer.len());
         let wav = encode_wav_pcm16_mono(&self.buffer, TARGET_RATE);
         self.buffer.clear();
         self.started_at_ms = None;
 
         match self.transport.transcribe(&self.config, &wav) {
             Ok(text) if !text.trim().is_empty() => {
+                eprintln!("[sf-asr] transcript: {text:?}");
                 let _ = self.sender.send(AsrEvent::Final {
                     session_id: self.session_id.clone(),
                     text,

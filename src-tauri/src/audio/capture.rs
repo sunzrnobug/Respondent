@@ -259,11 +259,13 @@ fn run_capture_thread(
     use std::time::Instant;
 
     use windows::core::{Error, HRESULT};
-    use windows::Win32::Foundation::{RPC_E_CHANGED_MODE, S_FALSE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows::Win32::Foundation::{
+        RPC_E_CHANGED_MODE, S_FALSE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    };
     use windows::Win32::Media::Audio::{
+        IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator,
         AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-        AUDCLNT_STREAMFLAGS_LOOPBACK, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator,
-        MMDeviceEnumerator, WAVEFORMATEX,
+        AUDCLNT_STREAMFLAGS_LOOPBACK, WAVEFORMATEX,
     };
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
@@ -470,7 +472,9 @@ fn parse_wave_format(
 ) -> Result<WasapiFormat, CaptureError> {
     use std::ptr;
     use windows::Win32::Media::Audio::WAVEFORMATEXTENSIBLE;
-    use windows::Win32::Media::KernelStreaming::{KSDATAFORMAT_SUBTYPE_PCM, WAVE_FORMAT_EXTENSIBLE};
+    use windows::Win32::Media::KernelStreaming::{
+        KSDATAFORMAT_SUBTYPE_PCM, WAVE_FORMAT_EXTENSIBLE,
+    };
 
     let format = unsafe { ptr::read_unaligned(format_ptr) };
     match format.wFormatTag as u32 {
@@ -487,7 +491,8 @@ fn parse_wave_format(
             SampleFormat::Float32,
         ),
         WAVE_FORMAT_EXTENSIBLE => {
-            let extensible = unsafe { ptr::read_unaligned(format_ptr.cast::<WAVEFORMATEXTENSIBLE>()) };
+            let extensible =
+                unsafe { ptr::read_unaligned(format_ptr.cast::<WAVEFORMATEXTENSIBLE>()) };
             let cb_size = format.cbSize;
             let sub_format = extensible.SubFormat;
             if cb_size < 22 {

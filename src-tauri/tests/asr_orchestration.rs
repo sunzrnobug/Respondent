@@ -23,7 +23,10 @@ fn endpointer_ignores_pure_silence() {
 #[test]
 fn endpointer_emits_start_of_speech_once() {
     let mut endpointer = EnergyEndpointer::new(0.01, 60);
-    assert_eq!(endpointer.observe(&frame(8000, 0)), Some(EndpointSignal::StartOfSpeech));
+    assert_eq!(
+        endpointer.observe(&frame(8000, 0)),
+        Some(EndpointSignal::StartOfSpeech)
+    );
     assert_eq!(endpointer.observe(&frame(8000, 20)), None);
 }
 
@@ -33,7 +36,10 @@ fn endpointer_emits_end_of_speech_after_silence_window() {
     endpointer.observe(&frame(8000, 0)); // start of speech
     assert_eq!(endpointer.observe(&frame(0, 20)), None); // 20ms silence
     assert_eq!(endpointer.observe(&frame(0, 40)), None); // 40ms silence
-    assert_eq!(endpointer.observe(&frame(0, 60)), Some(EndpointSignal::EndOfSpeech)); // 60ms
+    assert_eq!(
+        endpointer.observe(&frame(0, 60)),
+        Some(EndpointSignal::EndOfSpeech)
+    ); // 60ms
     assert_eq!(endpointer.observe(&frame(0, 80)), None); // already idle
 }
 
@@ -44,7 +50,10 @@ fn endpointer_rearms_for_a_new_utterance() {
     endpointer.observe(&frame(0, 20));
     endpointer.observe(&frame(0, 40));
     endpointer.observe(&frame(0, 60)); // end of speech
-    assert_eq!(endpointer.observe(&frame(8000, 80)), Some(EndpointSignal::StartOfSpeech));
+    assert_eq!(
+        endpointer.observe(&frame(8000, 80)),
+        Some(EndpointSignal::StartOfSpeech)
+    );
 }
 
 #[test]
@@ -62,7 +71,10 @@ fn endpointer_speech_burst_resets_silence_counter() {
     endpointer.observe(&frame(8000, 60)); // speech resumes -> counter resets
     assert_eq!(endpointer.observe(&frame(0, 80)), None); // only 20ms since speech
     assert_eq!(endpointer.observe(&frame(0, 100)), None); // 40ms
-    assert_eq!(endpointer.observe(&frame(0, 120)), Some(EndpointSignal::EndOfSpeech)); // 60ms
+    assert_eq!(
+        endpointer.observe(&frame(0, 120)),
+        Some(EndpointSignal::EndOfSpeech)
+    ); // 60ms
 }
 
 use respondent_lib::asr::client::{AsrEvent, StreamingAsrClient};
@@ -77,7 +89,9 @@ fn mock_emits_partials_while_frames_arrive() {
     }
 
     match events.try_recv().expect("a partial after 25 frames") {
-        AsrEvent::Partial { session_id, text, .. } => {
+        AsrEvent::Partial {
+            session_id, text, ..
+        } => {
             assert_eq!(session_id, "s1");
             assert_eq!(text, "could");
         }
@@ -100,7 +114,10 @@ fn mock_emits_full_phrase_on_finalize() {
             last_final = Some(text);
         }
     }
-    assert_eq!(last_final.as_deref(), Some("could you summarize the timeline"));
+    assert_eq!(
+        last_final.as_deref(),
+        Some("could you summarize the timeline")
+    );
 }
 
 #[test]
@@ -119,10 +136,13 @@ fn mock_advances_to_next_phrase_after_finalize() {
             _ => None,
         })
         .collect();
-    assert_eq!(finals, vec![
-        "could you summarize the timeline".to_string(),
-        "what are the main risks".to_string(),
-    ]);
+    assert_eq!(
+        finals,
+        vec![
+            "could you summarize the timeline".to_string(),
+            "what are the main risks".to_string(),
+        ]
+    );
 }
 
 #[test]
@@ -178,5 +198,8 @@ fn session_emits_partial_then_endpoint_then_final_for_one_utterance() {
         .iter()
         .position(|event| matches!(event, AsrEvent::Final { .. }))
         .expect("a final event");
-    assert!(endpoint_pos < final_pos, "endpoint must precede final: {collected:?}");
+    assert!(
+        endpoint_pos < final_pos,
+        "endpoint must precede final: {collected:?}"
+    );
 }

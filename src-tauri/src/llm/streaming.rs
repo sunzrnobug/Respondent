@@ -71,7 +71,11 @@ impl SseValueStream for ReqwestSseStream {
 /// `map`, forwarding Token/Final and assembling the final text. Dropping the
 /// returned generation disconnects the channel; the worker then stops pulling
 /// the stream (aborting the upstream request).
-pub fn spawn_streaming_reply<O, M>(request: ReplyRequest, open: O, map: M) -> Box<dyn ReplyGeneration>
+pub fn spawn_streaming_reply<O, M>(
+    request: ReplyRequest,
+    open: O,
+    map: M,
+) -> Box<dyn ReplyGeneration>
 where
     O: FnOnce() -> Result<Box<dyn SseValueStream>, LlmError> + Send + 'static,
     M: Fn(&Value) -> ReplyChunk + Send + 'static,

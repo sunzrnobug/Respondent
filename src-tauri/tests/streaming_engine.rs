@@ -39,14 +39,14 @@ fn collect(mut gen: Box<dyn ReplyGeneration>) -> Vec<ReplyEvent> {
 
 #[test]
 fn engine_emits_started_tokens_final_from_chunks() {
-    let items = vec![
-        json!({"t": "a"}),
-        json!({"t": "b"}),
-        json!({"done": true}),
-    ];
+    let items = vec![json!({"t": "a"}), json!({"t": "b"}), json!({"done": true})];
     let gen = spawn_streaming_reply(
         request(),
-        move || Ok(Box::new(VecStream { items: items.into() }) as Box<dyn SseValueStream>),
+        move || {
+            Ok(Box::new(VecStream {
+                items: items.into(),
+            }) as Box<dyn SseValueStream>)
+        },
         |v: &Value| {
             if v["done"].as_bool() == Some(true) {
                 ReplyChunk::Complete
@@ -99,5 +99,8 @@ fn engine_stops_streaming_when_generation_dropped() {
     let after_drop = pulls.load(Ordering::SeqCst);
     std::thread::sleep(Duration::from_millis(60));
     let later = pulls.load(Ordering::SeqCst);
-    assert_eq!(after_drop, later, "worker must stop pulling after the generation is dropped");
+    assert_eq!(
+        after_drop, later,
+        "worker must stop pulling after the generation is dropped"
+    );
 }

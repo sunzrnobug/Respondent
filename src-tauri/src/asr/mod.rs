@@ -1,3 +1,4 @@
+pub mod bailian_realtime;
 pub mod client;
 pub mod endpointer;
 pub mod mock;

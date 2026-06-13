@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use respondent_lib::llm::client::LlmError;
 use respondent_lib::llm::client::{
     ReplyEvent, ReplyGeneration, ReplyPoll, ReplyRequest, StreamingReplyClient,
 };
@@ -11,7 +12,6 @@ use respondent_lib::llm::openai_compatible::{
     ProviderConfig,
 };
 use respondent_lib::llm::streaming::{ReplyChunk, SseValueStream};
-use respondent_lib::llm::client::LlmError;
 use serde_json::{json, Value};
 
 fn config() -> ProviderConfig {
@@ -33,8 +33,14 @@ fn request() -> ReplyRequest {
 
 #[test]
 fn join_chat_url_handles_trailing_slash() {
-    assert_eq!(join_chat_url("https://x/v1"), "https://x/v1/chat/completions");
-    assert_eq!(join_chat_url("https://x/v1/"), "https://x/v1/chat/completions");
+    assert_eq!(
+        join_chat_url("https://x/v1"),
+        "https://x/v1/chat/completions"
+    );
+    assert_eq!(
+        join_chat_url("https://x/v1/"),
+        "https://x/v1/chat/completions"
+    );
 }
 
 #[test]
@@ -44,7 +50,10 @@ fn build_chat_body_has_stream_model_messages() {
     assert_eq!(body["stream"], true);
     let messages = body["messages"].as_array().expect("messages");
     assert_eq!(messages[0]["role"], "system");
-    assert!(messages[1]["content"].as_str().unwrap().contains("What next?"));
+    assert!(messages[1]["content"]
+        .as_str()
+        .unwrap()
+        .contains("What next?"));
 }
 
 #[test]
@@ -131,10 +140,8 @@ fn compatible_client_error_does_not_leak_key() {
 fn with_transport_rejects_empty_api_key() {
     let mut cfg = config();
     cfg.api_key = "".into();
-    let result = OpenAiCompatibleReplyClient::with_transport(
-        cfg,
-        Arc::new(FakeChatTransport::new(vec![])),
-    );
+    let result =
+        OpenAiCompatibleReplyClient::with_transport(cfg, Arc::new(FakeChatTransport::new(vec![])));
     assert!(result.is_err());
 }
 
@@ -142,10 +149,8 @@ fn with_transport_rejects_empty_api_key() {
 fn with_transport_rejects_empty_base_url() {
     let mut cfg = config();
     cfg.base_url = "".into();
-    let result = OpenAiCompatibleReplyClient::with_transport(
-        cfg,
-        Arc::new(FakeChatTransport::new(vec![])),
-    );
+    let result =
+        OpenAiCompatibleReplyClient::with_transport(cfg, Arc::new(FakeChatTransport::new(vec![])));
     assert!(result.is_err());
 }
 

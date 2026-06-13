@@ -1,3 +1,6 @@
+use respondent_lib::asr::bailian_realtime::{
+    BailianRealtimeAsrClient, BailianRealtimeConfig, BailianRealtimeTransport,
+};
 use respondent_lib::asr::client::AsrError;
 use respondent_lib::asr::client::AsrEvent;
 use respondent_lib::asr::client::StreamingAsrClient;
@@ -23,6 +26,24 @@ struct EmptyResponsesStream;
 
 impl RealtimeTransport for ContractTransport {
     fn send_json(&mut self, _value: Value) -> Result<(), AsrError> {
+        Ok(())
+    }
+
+    fn try_recv_json(&mut self) -> Result<Option<Value>, AsrError> {
+        Ok(None)
+    }
+
+    fn close(&mut self) -> Result<(), AsrError> {
+        Ok(())
+    }
+}
+
+impl BailianRealtimeTransport for ContractTransport {
+    fn send_json(&mut self, _value: Value) -> Result<(), AsrError> {
+        Ok(())
+    }
+
+    fn send_binary(&mut self, _bytes: Vec<u8>) -> Result<(), AsrError> {
         Ok(())
     }
 
@@ -100,6 +121,13 @@ fn mock_clients_report_their_names() {
     )
     .expect("openai client");
     assert_eq!(openai.name(), "openai-realtime-asr");
+    let bailian = BailianRealtimeAsrClient::with_transport(
+        "s1".to_string(),
+        BailianRealtimeConfig::from_api_key("test-key"),
+        Box::new(ContractTransport),
+    )
+    .expect("bailian client");
+    assert_eq!(bailian.name(), "bailian-realtime-asr");
     assert_eq!(MockReplyClient.name(), "mock-llm");
     let openai_reply = OpenAiReplyClient::with_transport(
         OpenAiReplyConfig::from_api_key("test-key"),

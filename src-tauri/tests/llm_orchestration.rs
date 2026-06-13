@@ -33,7 +33,9 @@ fn partial(text: &str) -> AsrEvent {
 fn trigger_fires_on_endpoint_then_final() {
     let mut trigger = ReplyTrigger::new("s1");
     assert!(trigger.observe(&endpoint()).is_none());
-    let request = trigger.observe(&final_event("hello there")).expect("a request");
+    let request = trigger
+        .observe(&final_event("hello there"))
+        .expect("a request");
     assert_eq!(request.session_id.as_str(), "s1");
     assert_eq!(request.generation_id.as_str(), "gen-1");
     assert_eq!(request.transcript.as_str(), "hello there");
@@ -108,7 +110,11 @@ fn mock_reply_streams_started_tokens_final_then_done() {
     }
 
     match events.first() {
-        Some(ReplyEvent::Started { generation_id, session_id, .. }) => {
+        Some(ReplyEvent::Started {
+            generation_id,
+            session_id,
+            ..
+        }) => {
             assert_eq!(generation_id.as_str(), "gen-1");
             assert_eq!(session_id.as_str(), "s1");
         }
@@ -123,13 +129,20 @@ fn mock_reply_streams_started_tokens_final_then_done() {
         .collect();
     assert_eq!(token_texts, ["Acknowledged: ", "could you summarize"]);
     match events.last() {
-        Some(ReplyEvent::Final { generation_id, text, .. }) => {
+        Some(ReplyEvent::Final {
+            generation_id,
+            text,
+            ..
+        }) => {
             assert_eq!(generation_id.as_str(), "gen-1");
             assert_eq!(text.as_str(), "Acknowledged: could you summarize");
         }
         other => panic!("expected final, got {other:?}"),
     }
-    assert!(matches!(generation.poll(), ReplyPoll::Done), "poll after done is stable");
+    assert!(
+        matches!(generation.poll(), ReplyPoll::Done),
+        "poll after done is stable"
+    );
 }
 
 use std::time::Duration;
@@ -154,8 +167,13 @@ fn session_streams_started_tokens_final_for_one_trigger() {
     }
     session.stop().unwrap();
 
-    assert!(matches!(collected.first(), Some(ReplyEvent::Started { .. })));
-    assert!(collected.iter().any(|event| matches!(event, ReplyEvent::Token { .. })));
+    assert!(matches!(
+        collected.first(),
+        Some(ReplyEvent::Started { .. })
+    ));
+    assert!(collected
+        .iter()
+        .any(|event| matches!(event, ReplyEvent::Token { .. })));
     match collected.last() {
         Some(ReplyEvent::Final { generation_id, .. }) => {
             assert_eq!(generation_id.as_str(), "gen-1");
@@ -195,5 +213,8 @@ fn session_latest_trigger_wins() {
             matches!(event, ReplyEvent::Final { generation_id, .. } if generation_id.as_str() == "gen-1")
         })
         .count();
-    assert_eq!(gen1_finals, 0, "gen-1 was superseded and must not produce a final");
+    assert_eq!(
+        gen1_finals, 0,
+        "gen-1 was superseded and must not produce a final"
+    );
 }

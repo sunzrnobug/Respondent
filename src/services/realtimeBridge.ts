@@ -2,7 +2,7 @@ import { listen } from "@tauri-apps/api/event";
 import { isRealtimeEvent, type RealtimeEvent } from "../domain/events";
 import type { StopRealtimeSession } from "./mockRealtime";
 
-export const REALTIME_EVENT_NAME = "realtime.event";
+export const REALTIME_EVENT_NAME = "realtime-event";
 
 export function isTauriRuntime(): boolean {
   return (
