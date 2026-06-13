@@ -20,6 +20,7 @@ const PENDING_WAIT: Duration = Duration::from_millis(5);
 
 pub struct ReplySession {
     events: Receiver<ReplyEvent>,
+    retry: Sender<()>,
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<Result<(), LlmError>>>,
 }
@@ -31,18 +32,27 @@ impl ReplySession {
         trigger: ReplyTrigger,
     ) -> ReplySession {
         let (out_tx, out_rx) = bounded::<ReplyEvent>(OUTPUT_CAPACITY);
+        let (retry_tx, retry_rx) = bounded::<()>(8);
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
 
         let handle = thread::Builder::new()
             .name("llm-reply-session".into())
             .spawn(move || {
-                run_session(&asr_events, client.as_ref(), trigger, &out_tx, &thread_stop)
+                run_session(
+                    &asr_events,
+                    &retry_rx,
+                    client.as_ref(),
+                    trigger,
+                    &out_tx,
+                    &thread_stop,
+                )
             })
             .expect("spawn llm reply session thread");
 
         ReplySession {
             events: out_rx,
+            retry: retry_tx,
             stop,
             handle: Some(handle),
         }
@@ -50,6 +60,12 @@ impl ReplySession {
 
     pub fn events(&self) -> Receiver<ReplyEvent> {
         self.events.clone()
+    }
+
+    pub fn request_retry(&self) -> Result<(), String> {
+        self.retry
+            .send(())
+            .map_err(|_| "回复会话已关闭".to_string())
     }
 
     pub fn stop(mut self) -> Result<(), LlmError> {
@@ -74,6 +90,7 @@ impl Drop for ReplySession {
 
 fn run_session(
     asr_events: &Receiver<AsrEvent>,
+    retry_rx: &Receiver<()>,
     client: &dyn StreamingReplyClient,
     mut trigger: ReplyTrigger,
     out: &Sender<ReplyEvent>,
@@ -92,22 +109,13 @@ fn run_session(
             match asr_events.try_recv() {
                 Ok(event) => {
                     if let Some(request) = trigger.observe(&event) {
-                        if let Some((session_id, generation_id)) = active_gen.take() {
-                            out.send_timeout(
-                                ReplyEvent::Cancelled {
-                                    session_id,
-                                    generation_id,
-                                    received_at_ms: super::streaming::now_ms(),
-                                },
-                                SEND_TIMEOUT,
-                            )
-                            .map_err(|_| LlmError::Closed)?;
-                        }
-                        active_gen = Some((
-                            request.session_id.clone(),
-                            request.generation_id.clone(),
-                        ));
-                        active = Some(client.start(request));
+                        start_generation(
+                            request,
+                            client,
+                            out,
+                            &mut active,
+                            &mut active_gen,
+                        )?;
                     }
                 }
                 Err(TryRecvError::Empty) => break,
@@ -115,6 +123,18 @@ fn run_session(
                     disconnected = true;
                     break;
                 }
+            }
+        }
+
+        while retry_rx.try_recv().is_ok() {
+            if let Some(request) = trigger.retry_last() {
+                start_generation(
+                    request,
+                    client,
+                    out,
+                    &mut active,
+                    &mut active_gen,
+                )?;
             }
         }
 
@@ -140,11 +160,13 @@ fn run_session(
         match asr_events.recv_timeout(IDLE_WAIT) {
             Ok(event) => {
                 if let Some(request) = trigger.observe(&event) {
-                    active_gen = Some((
-                        request.session_id.clone(),
-                        request.generation_id.clone(),
-                    ));
-                    active = Some(client.start(request));
+                    start_generation(
+                        request,
+                        client,
+                        out,
+                        &mut active,
+                        &mut active_gen,
+                    )?;
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -152,5 +174,31 @@ fn run_session(
         }
     }
 
+    Ok(())
+}
+
+fn start_generation(
+    request: super::client::ReplyRequest,
+    client: &dyn StreamingReplyClient,
+    out: &Sender<ReplyEvent>,
+    active: &mut Option<Box<dyn ReplyGeneration>>,
+    active_gen: &mut Option<(String, String)>,
+) -> Result<(), LlmError> {
+    if let Some((session_id, generation_id)) = active_gen.take() {
+        out.send_timeout(
+            ReplyEvent::Cancelled {
+                session_id,
+                generation_id,
+                received_at_ms: super::streaming::now_ms(),
+            },
+            SEND_TIMEOUT,
+        )
+        .map_err(|_| LlmError::Closed)?;
+    }
+    active_gen.replace((
+        request.session_id.clone(),
+        request.generation_id.clone(),
+    ));
+    *active = Some(client.start(request));
     Ok(())
 }

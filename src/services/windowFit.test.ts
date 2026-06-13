@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const setSizeMock = vi.hoisted(() => vi.fn(async () => undefined));
 const innerSizeMock = vi.hoisted(() =>
-  vi.fn(async () => ({ width: 420, height: 388 })),
+  vi.fn(async () => ({ width: 420, height: 520 })),
 );
 const scaleFactorMock = vi.hoisted(() => vi.fn(async () => 1));
 const getCurrentWindowMock = vi.hoisted(() =>
@@ -35,6 +35,14 @@ vi.mock("./realtimeBridge", () => ({
 
 import { setupMainWindowFit } from "./windowFit";
 
+async function flushWindowFit() {
+  for (let index = 0; index < 3; index += 1) {
+    await Promise.resolve();
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    await Promise.resolve();
+  }
+}
+
 describe("setupMainWindowFit", () => {
   let mutationCallback: MutationCallback | null = null;
 
@@ -43,25 +51,15 @@ describe("setupMainWindowFit", () => {
     innerSizeMock.mockClear();
     scaleFactorMock.mockClear();
     getCurrentWindowMock.mockClear();
-    innerSizeMock.mockResolvedValue({ width: 420, height: 388 });
+    innerSizeMock.mockResolvedValue({ width: 420, height: 520 });
     scaleFactorMock.mockResolvedValue(1);
+    setSizeMock.mockImplementation(async (size: { width: number; height: number }) => {
+      innerSizeMock.mockResolvedValue({
+        width: size.width,
+        height: size.height,
+      });
+    });
     mutationCallback = null;
-    vi.stubGlobal(
-      "ResizeObserver",
-      class {
-        private callback: ResizeObserverCallback;
-
-        constructor(callback: ResizeObserverCallback) {
-          this.callback = callback;
-        }
-
-        observe() {
-          this.callback([], this as unknown as ResizeObserver);
-        }
-
-        disconnect() {}
-      },
-    );
     vi.stubGlobal(
       "MutationObserver",
       class {
@@ -80,11 +78,11 @@ describe("setupMainWindowFit", () => {
     vi.unstubAllGlobals();
   });
 
-  it("resizes the main window height while preserving the native width", async () => {
+  it("fits the main window height to content on startup", async () => {
     const element = document.createElement("main");
     element.getBoundingClientRect = () =>
       ({
-        width: 560,
+        width: 420,
         height: 388,
         top: 0,
         left: 0,
@@ -96,13 +94,65 @@ describe("setupMainWindowFit", () => {
       }) as DOMRect;
 
     const cleanup = setupMainWindowFit(element);
-    await Promise.resolve();
-    await new Promise((resolve) => requestAnimationFrame(resolve));
-    await Promise.resolve();
+    await flushWindowFit();
 
     expect(setSizeMock).toHaveBeenCalledWith(
       expect.objectContaining({ width: 420, height: 388 }),
     );
+    expect(element.style.minHeight).toBe("388px");
+
+    cleanup();
+  });
+
+  it("stretches the shell when the native window is manually resized taller", async () => {
+    const element = document.createElement("main");
+    element.getBoundingClientRect = () =>
+      ({
+        width: 420,
+        height: 388,
+        top: 0,
+        left: 0,
+        right: 420,
+        bottom: 388,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }) as DOMRect;
+
+    const cleanup = setupMainWindowFit(element);
+    await flushWindowFit();
+
+    expect(element.style.minHeight).toBe("388px");
+
+    innerSizeMock.mockResolvedValue({ width: 420, height: 520 });
+    globalThis.dispatchEvent(new Event("resize"));
+    await flushWindowFit();
+
+    expect(element.style.minHeight).toBe("520px");
+
+    cleanup();
+  });
+
+  it("does not resize on startup when content already matches the window height", async () => {
+    const element = document.createElement("main");
+    element.getBoundingClientRect = () =>
+      ({
+        width: 420,
+        height: 520,
+        top: 0,
+        left: 0,
+        right: 420,
+        bottom: 520,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }) as DOMRect;
+
+    const cleanup = setupMainWindowFit(element);
+    await flushWindowFit();
+
+    expect(setSizeMock).not.toHaveBeenCalled();
+    expect(element.style.minHeight).toBe("520px");
 
     cleanup();
   });
@@ -127,26 +177,23 @@ describe("setupMainWindowFit", () => {
     });
 
     const cleanup = setupMainWindowFit(element);
-    await Promise.resolve();
-    await new Promise((resolve) => requestAnimationFrame(resolve));
-    await Promise.resolve();
+    await flushWindowFit();
 
     expect(setSizeMock).toHaveBeenCalledWith(
       expect.objectContaining({ width: 420, height: 300 }),
     );
 
     mutationCallback?.([], {} as MutationObserver);
-    await new Promise((resolve) => requestAnimationFrame(resolve));
-    await Promise.resolve();
+    await flushWindowFit();
 
     expect(setSizeMock).toHaveBeenCalledTimes(1);
 
     cleanup();
   });
 
-  it("resizes again when expanded content changes the visible shell box", async () => {
+  it("grows the window when expanded content exceeds the current height", async () => {
     const element = document.createElement("main");
-    let height = 300;
+    let height = 388;
     element.getBoundingClientRect = () =>
       ({
         width: 420,
@@ -161,22 +208,51 @@ describe("setupMainWindowFit", () => {
       }) as DOMRect;
 
     const cleanup = setupMainWindowFit(element);
-    await Promise.resolve();
-    await new Promise((resolve) => requestAnimationFrame(resolve));
-    await Promise.resolve();
+    await flushWindowFit();
 
     expect(setSizeMock).toHaveBeenCalledWith(
-      expect.objectContaining({ width: 420, height: 300 }),
+      expect.objectContaining({ width: 420, height: 388 }),
     );
 
-    height = 520;
+    height = 560;
     mutationCallback?.([], {} as MutationObserver);
-    await new Promise((resolve) => requestAnimationFrame(resolve));
-    await Promise.resolve();
+    await flushWindowFit();
 
     expect(setSizeMock).toHaveBeenLastCalledWith(
-      expect.objectContaining({ width: 420, height: 520 }),
+      expect.objectContaining({ width: 420, height: 560 }),
     );
+
+    cleanup();
+  });
+
+  it("does not shrink the window when content collapses below the current height", async () => {
+    innerSizeMock.mockResolvedValue({ width: 420, height: 600 });
+
+    const element = document.createElement("main");
+    let height = 600;
+    element.getBoundingClientRect = () =>
+      ({
+        width: 420,
+        height,
+        top: 0,
+        left: 0,
+        right: 420,
+        bottom: height,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }) as DOMRect;
+
+    const cleanup = setupMainWindowFit(element);
+    await flushWindowFit();
+
+    expect(setSizeMock).not.toHaveBeenCalled();
+
+    height = 300;
+    mutationCallback?.([], {} as MutationObserver);
+    await flushWindowFit();
+
+    expect(setSizeMock).not.toHaveBeenCalled();
 
     cleanup();
   });

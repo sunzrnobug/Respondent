@@ -46,6 +46,7 @@ pub fn run() {
             commands::list_audio_output_devices,
             commands::start_session,
             commands::end_session,
+            commands::retry_reply,
             commands::export_session_markdown,
             commands::export_session_text,
             commands::save_markdown_file,

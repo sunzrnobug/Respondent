@@ -87,8 +87,8 @@ button:disabled {
   --scrollbar-track: rgba(255, 255, 255, 0.05);
   --scrollbar-thumb: rgba(255, 255, 255, 0.22);
   --scrollbar-thumb-hover: rgba(255, 255, 255, 0.34);
-  width: min(560px, 100vw);
-  max-height: 640px;
+  width: 100%;
+  min-width: 360px;
   box-sizing: border-box;
   overflow: auto;
   padding: 12px;
@@ -1714,6 +1714,13 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.replyPanelActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
 }
 
 .replyGenerating {

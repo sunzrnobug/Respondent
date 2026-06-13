@@ -218,3 +218,59 @@ export function runMockRealtimeSession(
     timers.forEach((timer) => window.clearTimeout(timer));
   };
 }
+
+let mockRetryCounter = 0;
+
+export function scheduleMockReplyRetry(
+  sessionId: string,
+  emit: RealtimeEmit,
+): void {
+  mockRetryCounter += 1;
+  const generationId = `mock-retry-${mockRetryCounter}`;
+  const events: ScheduledEvent[] = [
+    {
+      delayMs: 0,
+      event: {
+        type: "reply.started",
+        sessionId,
+        generationId,
+        basedOnTranscriptEventId: `mock-retry-${mockRetryCounter}`,
+        receivedAtMs: Date.now(),
+      },
+    },
+    {
+      delayMs: 180,
+      event: {
+        type: "reply.token",
+        sessionId,
+        generationId,
+        token: "换个角度说，",
+        receivedAtMs: Date.now() + 180,
+      },
+    },
+    {
+      delayMs: 360,
+      event: {
+        type: "reply.token",
+        sessionId,
+        generationId,
+        token: "可以先给结论，再补充关键理由。",
+        receivedAtMs: Date.now() + 360,
+      },
+    },
+    {
+      delayMs: 540,
+      event: {
+        type: "reply.final",
+        sessionId,
+        generationId,
+        text: "换个角度说，可以先给结论，再补充关键理由。",
+        receivedAtMs: Date.now() + 540,
+      },
+    },
+  ];
+
+  events.forEach(({ delayMs, event }) => {
+    window.setTimeout(() => emit(event), delayMs);
+  });
+}

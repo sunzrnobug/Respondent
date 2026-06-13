@@ -231,3 +231,59 @@ fn session_latest_trigger_wins() {
         "gen-1 was superseded and must not produce a final"
     );
 }
+
+#[test]
+fn session_retries_last_turn_on_request() {
+    let (tx, rx) = unbounded();
+    let session = ReplySession::start(
+        rx,
+        Box::new(MockReplyClient),
+        ReplyTrigger::new("s1", empty_doc_store(), empty_style_store()),
+    );
+    let events = session.events();
+
+    tx.send(endpoint()).unwrap();
+    tx.send(final_event("retry me")).unwrap();
+
+    let first = collect_until_final(&events, Duration::from_secs(2));
+    assert!(first.iter().any(|event| matches!(
+        event,
+        ReplyEvent::Final {
+            generation_id,
+            text,
+            ..
+        } if generation_id == "gen-1" && text.starts_with("已确认：")
+    )));
+
+    session.request_retry().expect("retry signal");
+
+    let second = collect_until_final(&events, Duration::from_secs(2));
+    assert!(second.iter().any(|event| matches!(
+        event,
+        ReplyEvent::Final { generation_id, .. } if generation_id == "gen-2"
+    )));
+
+    drop(tx);
+    session.stop().unwrap();
+}
+
+fn collect_until_final(
+    events: &crossbeam_channel::Receiver<ReplyEvent>,
+    timeout: Duration,
+) -> Vec<ReplyEvent> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut collected = Vec::new();
+    while std::time::Instant::now() < deadline {
+        match events.recv_timeout(Duration::from_millis(50)) {
+            Ok(event) => {
+                collected.push(event);
+                if matches!(collected.last(), Some(ReplyEvent::Final { .. })) {
+                    return collected;
+                }
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    collected
+}

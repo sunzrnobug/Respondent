@@ -42,6 +42,10 @@ export async function endNativeSession(sessionId: string): Promise<void> {
   await invoke("end_session", { sessionId });
 }
 
+export async function retryReply(sessionId: string): Promise<void> {
+  await invoke("retry_reply", { sessionId });
+}
+
 export async function saveMarkdownFile(
   filename: string,
   content: string,

@@ -90,6 +90,22 @@ impl ReplyTrigger {
         let chunks = store.query(&query, 5);
         format_document_context(&chunks)
     }
+
+    /// Re-run reply generation for the latest final turn without mutating context.
+    pub fn retry_last(&mut self) -> Option<ReplyRequest> {
+        let transcript = self.context.last()?.clone();
+        self.generation_counter += 1;
+        let document_context = self.retrieve_document_context(&transcript);
+        let reply_style = Some(self.style_store.get());
+        Some(ReplyRequest {
+            session_id: self.session_id.clone(),
+            generation_id: format!("gen-{}", self.generation_counter),
+            transcript,
+            context: self.context.clone(),
+            document_context,
+            reply_style,
+        })
+    }
 }
 
 pub fn build_retrieval_query(context: &[String], transcript: &str) -> String {
@@ -106,6 +122,7 @@ pub fn build_retrieval_query(context: &[String], transcript: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::asr::client::AsrEvent;
     use crate::reply_style_settings::ReplyStyleSettingsStore;
     use std::sync::Arc;
 
@@ -184,6 +201,55 @@ mod tests {
             })
             .unwrap();
         assert!(request.document_context.is_none());
+    }
+
+    #[test]
+    fn retry_last_reuses_latest_turn_without_growing_context() {
+        let store = Arc::new(Mutex::new(DocumentStore::default()));
+        let mut trigger = ReplyTrigger::new("s1", store, style_store());
+        trigger.observe(&AsrEvent::Endpoint {
+            session_id: "s1".into(),
+            silence_ms: 300,
+            detected_at_ms: 0,
+        });
+        trigger
+            .observe(&AsrEvent::Final {
+                session_id: "s1".into(),
+                text: "first question".into(),
+                started_at_ms: 0,
+                ended_at_ms: 100,
+                received_at_ms: 0,
+            })
+            .expect("first reply");
+        trigger.observe(&AsrEvent::Endpoint {
+            session_id: "s1".into(),
+            silence_ms: 300,
+            detected_at_ms: 200,
+        });
+        trigger
+            .observe(&AsrEvent::Final {
+                session_id: "s1".into(),
+                text: "second question".into(),
+                started_at_ms: 100,
+                ended_at_ms: 200,
+                received_at_ms: 200,
+            })
+            .expect("second reply");
+
+        let retry = trigger.retry_last().expect("retry request");
+        assert_eq!(retry.generation_id, "gen-3");
+        assert_eq!(retry.transcript, "second question");
+        assert_eq!(
+            retry.context,
+            vec!["first question".to_string(), "second question".to_string()]
+        );
+    }
+
+    #[test]
+    fn retry_last_returns_none_when_context_empty() {
+        let store = Arc::new(Mutex::new(DocumentStore::default()));
+        let mut trigger = ReplyTrigger::new("s", store, style_store());
+        assert!(trigger.retry_last().is_none());
     }
 
     #[test]

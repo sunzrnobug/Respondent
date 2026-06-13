@@ -8,6 +8,7 @@ import {
   MessageSquareText,
   Pause,
   Play,
+  RotateCw,
   Settings,
   SlidersHorizontal,
   Square,
@@ -27,6 +28,7 @@ import {
   listAudioOutputDevices,
   listProviderProfiles,
   loadDocument,
+  retryReply,
   saveMarkdownFile,
   revealFileInFolder,
   unloadDocument,
@@ -44,7 +46,7 @@ import {
   listLocalProviderProfiles,
   saveLocalProviderProfile,
 } from "./state/providerProfiles";
-import { runMockRealtimeSession } from "./services/mockRealtime";
+import { runMockRealtimeSession, scheduleMockReplyRetry } from "./services/mockRealtime";
 import {
   closeCurrentDialogWindow,
   openDialogWindow,
@@ -299,6 +301,11 @@ export default function App() {
     !!session.currentGenerationId &&
     !session.currentSuggestion &&
     !!latestCompletedSuggestion;
+  const canRetrySuggestion =
+    session.status === "listening" &&
+    session.transcript.length > 0 &&
+    !isTransitioning &&
+    (isTauriRuntime() ? !!session.nativeSessionId : true);
   const activeSavedSession = selectedSession ?? savedSessions[0] ?? null;
   const visibleExportStatus =
     exportStatus && exportStatusSessionId === activeSavedSession?.id
@@ -722,6 +729,30 @@ export default function App() {
 
   async function copySuggestion() {
     await navigator.clipboard.writeText(displaySuggestion);
+  }
+
+  async function retrySuggestion() {
+    if (!canRetrySuggestion) return;
+
+    try {
+      if (isTauriRuntime()) {
+        if (!session.nativeSessionId) return;
+        await retryReply(session.nativeSessionId);
+        return;
+      }
+
+      scheduleMockReplyRetry(session.sessionId, (event) => {
+        if (mountedRef.current) {
+          setSession((current) => reduceSessionEvent(current, event));
+        }
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setSession((current) => ({
+        ...current,
+        systemMessages: [...current.systemMessages.slice(-20), `重试回复失败：${message}`],
+      }));
+    }
   }
 
   async function handleUploadDocument(file: File) {
@@ -1206,14 +1237,28 @@ export default function App() {
               <span className="replyGenerating">生成中…</span>
             )}
           </div>
-          <button
-            type="button"
-            onClick={copySuggestion}
-            disabled={!displaySuggestion}
-            title="复制建议回复"
-          >
-            <Copy size={16} />
-          </button>
+          <div className="replyPanelActions">
+            <button
+              type="button"
+              onClick={() => void retrySuggestion()}
+              disabled={!canRetrySuggestion}
+              title={
+                canRetrySuggestion
+                  ? "重新生成当前问题的建议回复"
+                  : "开始会话并有转写内容后可重试"
+              }
+            >
+              <RotateCw size={16} />
+            </button>
+            <button
+              type="button"
+              onClick={() => void copySuggestion()}
+              disabled={!displaySuggestion}
+              title="复制建议回复"
+            >
+              <Copy size={16} />
+            </button>
+          </div>
         </div>
         {displaySuggestion ? (
           <MarkdownContent className="reply">{displaySuggestion}</MarkdownContent>

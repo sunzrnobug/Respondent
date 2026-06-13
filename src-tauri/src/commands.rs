@@ -231,6 +231,23 @@ pub fn end_session(
 }
 
 #[tauri::command]
+pub fn retry_reply(
+    state: tauri::State<'_, SessionManager>,
+    session_id: String,
+) -> Result<(), String> {
+    validate_session_id(&session_id)?;
+    let sessions = state
+        .inner()
+        .sessions
+        .lock()
+        .map_err(|_| "Session manager lock failed".to_string())?;
+    let runtime = sessions
+        .get(&session_id)
+        .ok_or_else(|| "会话不存在或已结束".to_string())?;
+    runtime.request_reply_retry()
+}
+
+#[tauri::command]
 pub fn export_session_markdown(
     state: tauri::State<'_, PersistentSessionDb>,
     session_id: String,
@@ -535,6 +552,10 @@ impl SessionRuntime {
         let _ = self.reply.stop();
         self.asr_bridge.stop();
         self.reply_bridge.stop();
+    }
+
+    fn request_reply_retry(&self) -> Result<(), String> {
+        self.reply.request_retry()
     }
 }
 
