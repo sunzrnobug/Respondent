@@ -2,6 +2,7 @@ pub mod asr;
 pub mod audio;
 pub mod commands;
 pub mod llm;
+pub mod provider_config;
 pub mod session;
 pub mod telemetry;
 
@@ -15,7 +16,10 @@ pub fn run() {
         .setup(|app| {
             let db = commands::PersistentSessionDb::open(app.handle())
                 .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+            let provider_config = commands::ProviderConfigStore::open(app.handle())
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
             app.manage(db);
+            app.manage(provider_config);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -23,7 +27,10 @@ pub fn run() {
             commands::start_session,
             commands::end_session,
             commands::export_session_markdown,
-            commands::export_session_text
+            commands::export_session_text,
+            commands::get_provider_config,
+            commands::save_provider_config,
+            commands::clear_provider_config
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

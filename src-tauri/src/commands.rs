@@ -24,6 +24,10 @@ use crate::llm::openai_compatible::{OpenAiCompatibleReplyClient, ProviderConfig}
 use crate::llm::openai_responses::{OpenAiReplyClient, OpenAiReplyConfig};
 use crate::llm::reply_trigger::ReplyTrigger;
 use crate::llm::session::ReplySession;
+use crate::provider_config::{
+    clean_opt, load_provider_settings, save_provider_settings, settings_file_path,
+    AsrProviderSettings, LlmProviderSettings, ProviderConfigSummary, ProviderSettings,
+};
 use crate::session::db::{EventInsert, SessionDb};
 use crate::session::export::SessionExport;
 
@@ -106,6 +110,32 @@ impl PersistentSessionDb {
     }
 }
 
+#[derive(Clone)]
+pub struct ProviderConfigStore {
+    path: PathBuf,
+}
+
+impl ProviderConfigStore {
+    pub fn open(app: &tauri::AppHandle) -> Result<Self, String> {
+        Ok(Self {
+            path: settings_file_path(app)?,
+        })
+    }
+
+    #[cfg(test)]
+    pub fn open_path(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    fn load(&self) -> Result<ProviderSettings, String> {
+        load_provider_settings(&self.path)
+    }
+
+    fn save(&self, settings: &ProviderSettings) -> Result<(), String> {
+        save_provider_settings(&self.path, settings)
+    }
+}
+
 #[tauri::command]
 pub fn list_audio_output_devices() -> Vec<OutputDevice> {
     list_output_devices()
@@ -116,10 +146,12 @@ pub fn start_session(
     app: tauri::AppHandle,
     state: tauri::State<'_, SessionManager>,
     db: tauri::State<'_, PersistentSessionDb>,
+    provider_config: tauri::State<'_, ProviderConfigStore>,
     title: String,
     output_device_id: String,
 ) -> Result<String, String> {
     validate_start_session(&title, &output_device_id)?;
+    let provider_settings = provider_config.load()?;
     let session_id = new_session_id();
     db.with_db(|db| {
         db.start_session_with_id(&session_id, &title, &output_device_id)
@@ -130,6 +162,7 @@ pub fn start_session(
         session_id.clone(),
         output_device_id,
         db.inner().clone(),
+        provider_settings,
     );
     let runtime = match runtime_result {
         Ok(runtime) => runtime,
@@ -195,6 +228,54 @@ pub fn export_session_text(
     Ok(format_session_text(&export))
 }
 
+#[tauri::command]
+pub fn get_provider_config(
+    state: tauri::State<'_, ProviderConfigStore>,
+) -> Result<ProviderConfigSummary, String> {
+    Ok(state.load()?.summary())
+}
+
+#[tauri::command]
+pub fn save_provider_config(
+    state: tauri::State<'_, ProviderConfigStore>,
+    payload: ProviderSettings,
+) -> Result<ProviderConfigSummary, String> {
+    let existing = state.load()?;
+    let merged = merge_provider_settings(existing, payload);
+    state.save(&merged)?;
+    Ok(merged.summary())
+}
+
+#[tauri::command]
+pub fn clear_provider_config(
+    state: tauri::State<'_, ProviderConfigStore>,
+    scope: Option<String>,
+) -> Result<ProviderConfigSummary, String> {
+    let mut settings = state.load()?;
+    match scope
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("llm") => settings.llm = None,
+        Some("asr") => settings.asr = None,
+        _ => settings = ProviderSettings::default(),
+    }
+    state.save(&settings)?;
+    Ok(settings.summary())
+}
+
+pub fn merge_provider_settings(
+    existing: ProviderSettings,
+    update: ProviderSettings,
+) -> ProviderSettings {
+    ProviderSettings {
+        llm: merge_llm_settings(existing.llm, update.llm),
+        asr: merge_asr_settings(existing.asr, update.asr),
+    }
+}
+
 pub fn start_session_for_test(title: String, output_device_id: String) -> Result<String, String> {
     validate_start_session(&title, &output_device_id)?;
     Ok(new_session_id())
@@ -239,12 +320,13 @@ impl SessionRuntime {
         session_id: String,
         output_device_id: String,
         db: PersistentSessionDb,
+        provider_settings: ProviderSettings,
     ) -> Result<Self, String> {
         eprintln!("[runtime] start: device={output_device_id:?}");
         let capture = LoopbackCapture::start(&output_device_id).map_err(|err| err.to_string())?;
         eprintln!("[runtime] capture started");
         let frames = capture.receiver();
-        let (asr_client, using_mock_asr) = build_asr_client(&session_id)?;
+        let (asr_client, using_mock_asr) = build_asr_client(&session_id, &provider_settings)?;
         eprintln!("[runtime] asr provider mock={using_mock_asr}");
         let transcription = TranscriptionSession::start(
             session_id.clone(),
@@ -255,7 +337,7 @@ impl SessionRuntime {
         let asr_events = transcription.events();
         let (reply_asr_tx, reply_asr_rx) = unbounded::<AsrEvent>();
         let asr_bridge = spawn_asr_bridge(app.clone(), asr_events, reply_asr_tx, db.clone());
-        let (reply_client, using_mock_llm) = build_reply_client()?;
+        let (reply_client, using_mock_llm) = build_reply_client(&provider_settings)?;
         let reply = ReplySession::start(
             reply_asr_rx,
             reply_client,
@@ -300,8 +382,11 @@ impl SessionRuntime {
     }
 }
 
-fn build_asr_client(session_id: &str) -> Result<(Box<dyn StreamingAsrClient>, bool), String> {
-    resolve_asr_client(session_id, &current_env())
+fn build_asr_client(
+    session_id: &str,
+    settings: &ProviderSettings,
+) -> Result<(Box<dyn StreamingAsrClient>, bool), String> {
+    resolve_asr_client_with_settings(session_id, &current_env(), settings)
 }
 
 pub fn resolve_asr_client(
@@ -337,11 +422,12 @@ pub fn resolve_asr_client(
         },
         "openai_realtime" => match get("OPENAI_API_KEY") {
             Some(api_key) => {
-                let client = OpenAiRealtimeAsrClient::connect(
-                    session_id.to_string(),
-                    OpenAiRealtimeConfig::from_api_key(api_key),
-                )
-                .map_err(|e| e.to_string())?;
+                let mut config = OpenAiRealtimeConfig::from_api_key(api_key);
+                if let Some(model) = get("OPENAI_ASR_MODEL") {
+                    config.model = model;
+                }
+                let client = OpenAiRealtimeAsrClient::connect(session_id.to_string(), config)
+                    .map_err(|e| e.to_string())?;
                 Ok((Box::new(client), false))
             }
             None => Ok((Box::new(MockAsrClient::new(session_id)), true)),
@@ -374,6 +460,17 @@ pub fn resolve_asr_client(
     }
 }
 
+pub fn resolve_asr_client_with_settings(
+    session_id: &str,
+    env: &HashMap<String, String>,
+    settings: &ProviderSettings,
+) -> Result<(Box<dyn StreamingAsrClient>, bool), String> {
+    match settings.asr.as_ref().and_then(asr_settings_env) {
+        Some(manual_env) => resolve_asr_client(session_id, &manual_env),
+        None => resolve_asr_client(session_id, env),
+    }
+}
+
 pub fn resolve_asr_provider_name(session_id: &str, env: &HashMap<String, String>) -> &'static str {
     let _ = session_id;
     let provider = env
@@ -388,6 +485,17 @@ pub fn resolve_asr_provider_name(session_id: &str, env: &HashMap<String, String>
         "openai_realtime" if has("OPENAI_API_KEY") => "openai-realtime-asr",
         "bailian_realtime" if has("DASHSCOPE_API_KEY") => "bailian-realtime-asr",
         _ => "mock-asr",
+    }
+}
+
+pub fn resolve_asr_provider_name_with_settings(
+    session_id: &str,
+    env: &HashMap<String, String>,
+    settings: &ProviderSettings,
+) -> &'static str {
+    match settings.asr.as_ref().and_then(asr_settings_env) {
+        Some(manual_env) => resolve_asr_provider_name(session_id, &manual_env),
+        None => resolve_asr_provider_name(session_id, env),
     }
 }
 
@@ -487,8 +595,27 @@ pub fn resolve_reply_client(
     }
 }
 
+pub fn resolve_reply_client_with_settings(
+    env: &HashMap<String, String>,
+    settings: &ProviderSettings,
+) -> Result<(Box<dyn StreamingReplyClient>, bool), String> {
+    match settings.llm.as_ref().and_then(llm_settings_env) {
+        Some(manual_env) => resolve_reply_client(&manual_env),
+        None => resolve_reply_client(env),
+    }
+}
+
 pub fn resolve_reply_provider_name(env: &HashMap<String, String>) -> &'static str {
     let (client, _) = resolve_reply_client(env).expect("resolve reply client");
+    client.name()
+}
+
+pub fn resolve_reply_provider_name_with_settings(
+    env: &HashMap<String, String>,
+    settings: &ProviderSettings,
+) -> &'static str {
+    let (client, _) =
+        resolve_reply_client_with_settings(env, settings).expect("resolve reply client");
     client.name()
 }
 
@@ -496,8 +623,157 @@ fn current_env() -> HashMap<String, String> {
     std::env::vars().collect()
 }
 
-fn build_reply_client() -> Result<(Box<dyn StreamingReplyClient>, bool), String> {
-    resolve_reply_client(&current_env())
+fn llm_settings_env(settings: &LlmProviderSettings) -> Option<HashMap<String, String>> {
+    let provider = non_empty(&settings.provider)?;
+    let api_key = settings.api_key.as_deref().and_then(non_empty)?;
+    let mut env = HashMap::new();
+    env.insert("LLM_PROVIDER".to_string(), provider.clone());
+
+    match provider.as_str() {
+        "openai" => {
+            env.insert("OPENAI_API_KEY".to_string(), api_key);
+            insert_optional(&mut env, "OPENAI_LLM_MODEL", settings.model.as_deref());
+        }
+        "dashscope" => {
+            env.insert("DASHSCOPE_API_KEY".to_string(), api_key);
+            insert_optional(&mut env, "DASHSCOPE_BASE_URL", settings.base_url.as_deref());
+            insert_optional(&mut env, "DASHSCOPE_LLM_MODEL", settings.model.as_deref());
+        }
+        "zhipu" => {
+            env.insert("ZHIPU_API_KEY".to_string(), api_key);
+            insert_optional(&mut env, "ZHIPU_BASE_URL", settings.base_url.as_deref());
+            insert_optional(&mut env, "ZHIPU_LLM_MODEL", settings.model.as_deref());
+        }
+        "siliconflow" => {
+            env.insert("SILICONFLOW_API_KEY".to_string(), api_key);
+            insert_optional(
+                &mut env,
+                "SILICONFLOW_BASE_URL",
+                settings.base_url.as_deref(),
+            );
+            insert_optional(&mut env, "SILICONFLOW_LLM_MODEL", settings.model.as_deref());
+        }
+        "openai_compatible" => {
+            env.insert("OPENAI_COMPATIBLE_API_KEY".to_string(), api_key);
+            env.insert(
+                "OPENAI_COMPATIBLE_BASE_URL".to_string(),
+                settings.base_url.as_deref().and_then(non_empty)?,
+            );
+            env.insert(
+                "OPENAI_COMPATIBLE_MODEL".to_string(),
+                settings.model.as_deref().and_then(non_empty)?,
+            );
+        }
+        _ => return None,
+    }
+
+    Some(env)
+}
+
+fn asr_settings_env(settings: &AsrProviderSettings) -> Option<HashMap<String, String>> {
+    let provider = non_empty(&settings.provider)?;
+    let api_key = settings.api_key.as_deref().and_then(non_empty)?;
+    let mut env = HashMap::new();
+    env.insert("ASR_PROVIDER".to_string(), provider.clone());
+
+    match provider.as_str() {
+        "openai_realtime" => {
+            env.insert("OPENAI_API_KEY".to_string(), api_key);
+            insert_optional(&mut env, "OPENAI_ASR_MODEL", settings.model.as_deref());
+        }
+        "bailian_realtime" => {
+            env.insert("DASHSCOPE_API_KEY".to_string(), api_key);
+            insert_optional(&mut env, "DASHSCOPE_ASR_MODEL", settings.model.as_deref());
+            insert_optional(
+                &mut env,
+                "DASHSCOPE_ASR_LANGUAGE_HINT",
+                settings.language_hint.as_deref(),
+            );
+            if let Some(value) = settings.max_sentence_silence_ms {
+                env.insert(
+                    "DASHSCOPE_ASR_MAX_SENTENCE_SILENCE_MS".to_string(),
+                    value.to_string(),
+                );
+            }
+            if let Some(value) = settings.heartbeat {
+                env.insert("DASHSCOPE_ASR_HEARTBEAT".to_string(), value.to_string());
+            }
+        }
+        "siliconflow_file" => {
+            env.insert("SILICONFLOW_API_KEY".to_string(), api_key);
+            insert_optional(
+                &mut env,
+                "SILICONFLOW_BASE_URL",
+                settings.base_url.as_deref(),
+            );
+            insert_optional(&mut env, "SILICONFLOW_ASR_MODEL", settings.model.as_deref());
+        }
+        _ => return None,
+    }
+
+    Some(env)
+}
+
+fn insert_optional(env: &mut HashMap<String, String>, key: &str, value: Option<&str>) {
+    if let Some(value) = value.and_then(non_empty) {
+        env.insert(key.to_string(), value);
+    }
+}
+
+fn merge_llm_settings(
+    existing: Option<LlmProviderSettings>,
+    update: Option<LlmProviderSettings>,
+) -> Option<LlmProviderSettings> {
+    let update = update?;
+    let old_key = existing
+        .as_ref()
+        .filter(|existing| same_provider(&existing.provider, &update.provider))
+        .and_then(|existing| existing.api_key.clone());
+    Some(LlmProviderSettings {
+        provider: clean_opt(Some(&update.provider))?,
+        api_key: clean_opt(update.api_key.as_deref()).or(old_key),
+        base_url: clean_opt(update.base_url.as_deref()),
+        model: clean_opt(update.model.as_deref()),
+    })
+}
+
+fn merge_asr_settings(
+    existing: Option<AsrProviderSettings>,
+    update: Option<AsrProviderSettings>,
+) -> Option<AsrProviderSettings> {
+    let update = update?;
+    let old_key = existing
+        .as_ref()
+        .filter(|existing| same_provider(&existing.provider, &update.provider))
+        .and_then(|existing| existing.api_key.clone());
+    Some(AsrProviderSettings {
+        provider: clean_opt(Some(&update.provider))?,
+        api_key: clean_opt(update.api_key.as_deref()).or(old_key),
+        base_url: clean_opt(update.base_url.as_deref()),
+        model: clean_opt(update.model.as_deref()),
+        language_hint: clean_opt(update.language_hint.as_deref()),
+        max_sentence_silence_ms: update.max_sentence_silence_ms,
+        heartbeat: update.heartbeat,
+    })
+}
+
+fn same_provider(left: &str, right: &str) -> bool {
+    left.trim().eq_ignore_ascii_case(right.trim())
+}
+
+fn non_empty(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn build_reply_client(
+    settings: &ProviderSettings,
+) -> Result<(Box<dyn StreamingReplyClient>, bool), String> {
+    resolve_reply_client_with_settings(&current_env(), settings)
 }
 
 struct BridgeHandle {

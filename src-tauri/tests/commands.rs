@@ -1,8 +1,10 @@
 use respondent_lib::commands::{
     end_session_for_test, export_session_markdown_for_test, export_session_text_for_test,
-    resolve_asr_provider_name, resolve_reply_provider_name, start_session_for_test,
+    merge_provider_settings, resolve_asr_provider_name, resolve_asr_provider_name_with_settings,
+    resolve_reply_provider_name, resolve_reply_provider_name_with_settings, start_session_for_test,
     SystemStatusEvent,
 };
+use respondent_lib::provider_config::{AsrProviderSettings, LlmProviderSettings, ProviderSettings};
 use respondent_lib::session::export::{SessionExport, SessionExportEvent};
 
 fn env(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
@@ -124,6 +126,48 @@ fn provider_zhipu_accepts_zai_api_key() {
 }
 
 #[test]
+fn llm_manual_settings_override_env() {
+    let settings = ProviderSettings {
+        llm: Some(LlmProviderSettings {
+            provider: "siliconflow".into(),
+            api_key: Some("manual-key".into()),
+            base_url: None,
+            model: None,
+        }),
+        asr: None,
+    };
+
+    assert_eq!(
+        resolve_reply_provider_name_with_settings(
+            &env(&[("LLM_PROVIDER", "openai"), ("OPENAI_API_KEY", "env-key")]),
+            &settings,
+        ),
+        "openai-compatible-llm"
+    );
+}
+
+#[test]
+fn llm_incomplete_manual_settings_fall_back_to_env() {
+    let settings = ProviderSettings {
+        llm: Some(LlmProviderSettings {
+            provider: "siliconflow".into(),
+            api_key: None,
+            base_url: None,
+            model: None,
+        }),
+        asr: None,
+    };
+
+    assert_eq!(
+        resolve_reply_provider_name_with_settings(
+            &env(&[("LLM_PROVIDER", "openai"), ("OPENAI_API_KEY", "env-key")]),
+            &settings,
+        ),
+        "openai-responses-llm"
+    );
+}
+
+#[test]
 fn asr_defaults_to_mock_without_keys() {
     assert_eq!(resolve_asr_provider_name("s1", &env(&[])), "mock-asr");
 }
@@ -170,4 +214,84 @@ fn asr_bailian_realtime_missing_key_falls_back_to_mock() {
         resolve_asr_provider_name("s1", &env(&[("ASR_PROVIDER", "bailian_realtime")])),
         "mock-asr"
     );
+}
+
+#[test]
+fn asr_manual_settings_override_env() {
+    let settings = ProviderSettings {
+        llm: None,
+        asr: Some(AsrProviderSettings {
+            provider: "bailian_realtime".into(),
+            api_key: Some("manual-key".into()),
+            base_url: None,
+            model: None,
+            language_hint: None,
+            max_sentence_silence_ms: None,
+            heartbeat: None,
+        }),
+    };
+
+    assert_eq!(
+        resolve_asr_provider_name_with_settings(
+            "s1",
+            &env(&[
+                ("ASR_PROVIDER", "openai_realtime"),
+                ("OPENAI_API_KEY", "env-key")
+            ]),
+            &settings,
+        ),
+        "bailian-realtime-asr"
+    );
+}
+
+#[test]
+fn provider_config_update_without_api_key_preserves_existing_key() {
+    let existing = ProviderSettings {
+        llm: Some(LlmProviderSettings {
+            provider: "openai".into(),
+            api_key: Some("old-key".into()),
+            base_url: None,
+            model: Some("old-model".into()),
+        }),
+        asr: None,
+    };
+    let update = ProviderSettings {
+        llm: Some(LlmProviderSettings {
+            provider: "openai".into(),
+            api_key: None,
+            base_url: None,
+            model: Some("new-model".into()),
+        }),
+        asr: None,
+    };
+
+    let merged = merge_provider_settings(existing, update);
+
+    assert_eq!(merged.llm.unwrap().api_key.as_deref(), Some("old-key"));
+}
+
+#[test]
+fn provider_config_update_does_not_reuse_key_for_different_provider() {
+    let existing = ProviderSettings {
+        llm: Some(LlmProviderSettings {
+            provider: "openai".into(),
+            api_key: Some("old-key".into()),
+            base_url: None,
+            model: None,
+        }),
+        asr: None,
+    };
+    let update = ProviderSettings {
+        llm: Some(LlmProviderSettings {
+            provider: "siliconflow".into(),
+            api_key: None,
+            base_url: None,
+            model: None,
+        }),
+        asr: None,
+    };
+
+    let merged = merge_provider_settings(existing, update);
+
+    assert!(merged.llm.unwrap().api_key.is_none());
 }
