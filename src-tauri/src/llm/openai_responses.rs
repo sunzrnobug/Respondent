@@ -1,20 +1,14 @@
 use std::fmt;
 use std::io::{BufRead, BufReader};
 use std::sync::Arc;
-use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use crossbeam_channel::{unbounded, Receiver};
 use serde_json::{json, Value};
 
-use super::client::{
-    LlmError, ReplyEvent, ReplyGeneration, ReplyPoll, ReplyRequest, StreamingReplyClient,
-};
+use super::client::{LlmError, ReplyGeneration, ReplyRequest, StreamingReplyClient};
+use super::streaming::{spawn_streaming_reply, truncate_for_error, ReplyChunk, SseValueStream};
 
 const DEFAULT_OPENAI_REPLY_MODEL: &str = "gpt-5.4-mini";
 const RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
-const GENERIC_FAILURE_TEXT: &str =
-    "Reply generation failed. Check your OpenAI API key or network connection.";
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct OpenAiReplyConfig {
@@ -157,17 +151,43 @@ impl OpenAiReplyClient {
     }
 }
 
+/// Adapter so a `ResponsesEventStream` is usable as an `SseValueStream`.
+struct ResponsesValueStream(Box<dyn ResponsesEventStream>);
+
+impl SseValueStream for ResponsesValueStream {
+    fn next_value(&mut self) -> Result<Option<Value>, LlmError> {
+        self.0.next_event()
+    }
+}
+
 impl StreamingReplyClient for OpenAiReplyClient {
     fn name(&self) -> &'static str {
         "openai-responses-llm"
     }
 
     fn start(&self, request: ReplyRequest) -> Box<dyn ReplyGeneration> {
-        Box::new(OpenAiReplyGeneration::start(
-            self.config.clone(),
-            Arc::clone(&self.transport),
-            request,
-        ))
+        let config = self.config.clone();
+        let transport = Arc::clone(&self.transport);
+        let open = {
+            let request = request.clone();
+            move || -> Result<Box<dyn SseValueStream>, LlmError> {
+                let stream = transport.stream(&config, &request)?;
+                Ok(Box::new(ResponsesValueStream(stream)))
+            }
+        };
+        spawn_streaming_reply(request, open, responses_map)
+    }
+}
+
+fn responses_map(value: &Value) -> ReplyChunk {
+    match value["type"].as_str() {
+        Some("response.output_text.delta") => match value["delta"].as_str() {
+            Some(delta) => ReplyChunk::Token(delta.to_string()),
+            None => ReplyChunk::Ignore,
+        },
+        Some("response.completed") => ReplyChunk::Complete,
+        Some("response.error") | Some("error") => ReplyChunk::Error,
+        _ => ReplyChunk::Ignore,
     }
 }
 
@@ -192,142 +212,7 @@ pub fn build_responses_body(config: &OpenAiReplyConfig, request: &ReplyRequest) 
     })
 }
 
-struct OpenAiReplyGeneration {
-    receiver: Receiver<ReplyPoll>,
-    done: bool,
-}
-
-impl OpenAiReplyGeneration {
-    fn start(
-        config: OpenAiReplyConfig,
-        transport: Arc<dyn ResponsesTransport>,
-        request: ReplyRequest,
-    ) -> Self {
-        let (sender, receiver) = unbounded();
-        let _ = sender.send(ReplyPoll::Event(ReplyEvent::Started {
-            session_id: request.session_id.clone(),
-            generation_id: request.generation_id.clone(),
-            based_on_transcript_event_id: format!("transcript-{}", request.generation_id),
-            received_at_ms: now_ms(),
-        }));
-
-        thread::Builder::new()
-            .name("openai-responses-llm".into())
-            .spawn(move || {
-                let session_id = request.session_id.clone();
-                let generation_id = request.generation_id.clone();
-                let mut final_text = String::new();
-                let stream = transport.stream(&config, &request);
-                let mut stream = match stream {
-                    Ok(stream) => stream,
-                    Err(_) => {
-                        send_failure_final(&sender, &session_id, &generation_id);
-                        let _ = sender.send(ReplyPoll::Done);
-                        return;
-                    }
-                };
-
-                loop {
-                    match stream.next_event() {
-                        Ok(Some(event)) => match event["type"].as_str() {
-                            Some("response.output_text.delta") => {
-                                if let Some(delta) = event["delta"].as_str() {
-                                    final_text.push_str(delta);
-                                    let _ = sender.send(ReplyPoll::Event(ReplyEvent::Token {
-                                        session_id: session_id.clone(),
-                                        generation_id: generation_id.clone(),
-                                        token: delta.to_string(),
-                                        received_at_ms: now_ms(),
-                                    }));
-                                }
-                            }
-                            Some("response.completed") => {
-                                send_final(&sender, &session_id, &generation_id, final_text);
-                                let _ = sender.send(ReplyPoll::Done);
-                                return;
-                            }
-                            Some("response.error") | Some("error") => {
-                                send_failure_final(&sender, &session_id, &generation_id);
-                                let _ = sender.send(ReplyPoll::Done);
-                                return;
-                            }
-                            _ => {}
-                        },
-                        Ok(None) => {
-                            if final_text.is_empty() {
-                                send_failure_final(&sender, &session_id, &generation_id);
-                            } else {
-                                send_final(&sender, &session_id, &generation_id, final_text);
-                            }
-                            let _ = sender.send(ReplyPoll::Done);
-                            return;
-                        }
-                        Err(_) => {
-                            send_failure_final(&sender, &session_id, &generation_id);
-                            let _ = sender.send(ReplyPoll::Done);
-                            return;
-                        }
-                    }
-                }
-            })
-            .expect("spawn openai responses llm worker");
-
-        Self {
-            receiver,
-            done: false,
-        }
-    }
-}
-
-impl ReplyGeneration for OpenAiReplyGeneration {
-    fn poll(&mut self) -> ReplyPoll {
-        if self.done {
-            return ReplyPoll::Done;
-        }
-
-        match self.receiver.try_recv() {
-            Ok(ReplyPoll::Done) => {
-                self.done = true;
-                ReplyPoll::Done
-            }
-            Ok(poll) => poll,
-            Err(crossbeam_channel::TryRecvError::Empty) => ReplyPoll::Pending,
-            Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                self.done = true;
-                ReplyPoll::Done
-            }
-        }
-    }
-}
-
-fn send_final(
-    sender: &crossbeam_channel::Sender<ReplyPoll>,
-    session_id: &str,
-    generation_id: &str,
-    text: String,
-) {
-    let _ = sender.send(ReplyPoll::Event(ReplyEvent::Final {
-        session_id: session_id.to_string(),
-        generation_id: generation_id.to_string(),
-        text,
-        received_at_ms: now_ms(),
-    }));
-}
-
-fn send_failure_final(
-    sender: &crossbeam_channel::Sender<ReplyPoll>,
-    session_id: &str,
-    generation_id: &str,
-) {
-    send_final(
-        sender,
-        session_id,
-        generation_id,
-        GENERIC_FAILURE_TEXT.to_string(),
-    );
-}
-
-fn format_context(context: &[String]) -> String {
+pub fn format_context(context: &[String]) -> String {
     if context.is_empty() {
         return "(none)".to_string();
     }
@@ -339,32 +224,9 @@ fn format_context(context: &[String]) -> String {
         .join("\n")
 }
 
-fn truncate_for_error(text: &str) -> String {
-    const LIMIT: usize = 240;
-    let trimmed = text.trim();
-    if trimmed.len() <= LIMIT {
-        return trimmed.to_string();
-    }
-
-    let boundary = trimmed
-        .char_indices()
-        .map(|(index, _)| index)
-        .take_while(|index| *index <= LIMIT)
-        .last()
-        .unwrap_or(0);
-    format!("{}...", &trimmed[..boundary])
-}
-
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as i64)
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::truncate_for_error;
+    use super::super::streaming::truncate_for_error;
 
     #[test]
     fn truncate_for_error_handles_unicode_boundaries() {
