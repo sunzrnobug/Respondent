@@ -35,8 +35,10 @@ use crate::provider_config::{
     ProviderProfilesResponse, ProviderSettings,
 };
 use crate::reply_style_settings::{ReplyStyleSettings, ReplyStyleSettingsStore};
-use crate::session::db::{EventInsert, SessionDb};
+use crate::secret_store::delete_profile_secrets;
+use crate::session::db::{EventInsert, SessionDb, SessionSummary, DEFAULT_SESSION_RETENTION_DAYS};
 use crate::session::export::SessionExport;
+use crate::session::saved::SavedSession;
 
 pub const REALTIME_EVENT_NAME: &str = "realtime-event";
 const BRIDGE_WAIT: Duration = Duration::from_millis(100);
@@ -57,6 +59,10 @@ impl SystemStatusEvent {
         Self::new(session_id, "info", message)
     }
 
+    pub fn warn(session_id: Option<String>, message: impl Into<String>) -> Self {
+        Self::new(session_id, "warn", message)
+    }
+
     pub fn error(session_id: Option<String>, message: impl Into<String>) -> Self {
         Self::new(session_id, "error", message)
     }
@@ -69,6 +75,41 @@ impl SystemStatusEvent {
             message: message.into(),
             received_at_ms: now_ms(),
         }
+    }
+}
+
+/// Demo mock providers are allowed in debug builds unless explicitly disabled.
+pub fn allow_mock_providers() -> bool {
+    match std::env::var("RESPONDENT_ALLOW_MOCK") {
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => cfg!(debug_assertions),
+    }
+}
+
+fn mock_asr_client_or_error(
+    session_id: &str,
+    provider: &str,
+    missing: &str,
+) -> Result<(Box<dyn StreamingAsrClient>, bool), String> {
+    if allow_mock_providers() {
+        Ok((Box::new(MockAsrClient::new(session_id)), true))
+    } else {
+        Err(format!(
+            "ASR 服务商 `{provider}` 未配置完整：{missing}。请补全服务商配置，或仅在本地演示时设置 RESPONDENT_ALLOW_MOCK=1。"
+        ))
+    }
+}
+
+fn mock_reply_client_or_error(provider: &str, missing: &str) -> Result<(Box<dyn StreamingReplyClient>, bool), String> {
+    if allow_mock_providers() {
+        Ok((Box::new(MockReplyClient), true))
+    } else {
+        Err(format!(
+            "LLM 服务商 `{provider}` 未配置完整：{missing}。请补全服务商配置，或仅在本地演示时设置 RESPONDENT_ALLOW_MOCK=1。"
+        ))
     }
 }
 
@@ -268,6 +309,89 @@ pub fn export_session_text(
 }
 
 #[tauri::command]
+pub fn list_session_records(
+    state: tauri::State<'_, PersistentSessionDb>,
+) -> Result<Vec<SessionSummary>, String> {
+    state.with_db(|db| db.list_sessions().map_err(|err| err.to_string()))
+}
+
+#[tauri::command]
+pub fn delete_session_record(
+    state: tauri::State<'_, PersistentSessionDb>,
+    session_id: String,
+) -> Result<(), String> {
+    validate_session_id(&session_id)?;
+    state.with_db(|db| db.delete_session(&session_id).map_err(|err| err.to_string()))
+}
+
+#[tauri::command]
+pub fn purge_old_sessions(
+    state: tauri::State<'_, PersistentSessionDb>,
+    retention_days: Option<u32>,
+) -> Result<u64, String> {
+    let days = retention_days.unwrap_or(DEFAULT_SESSION_RETENTION_DAYS).max(1);
+    state.with_db(|db| db.purge_sessions_older_than_days(days).map_err(|err| err.to_string()))
+}
+
+pub fn purge_expired_sessions_on_startup(db: &PersistentSessionDb) {
+    let days = DEFAULT_SESSION_RETENTION_DAYS;
+    match db.with_db(|db| {
+        let runtime_deleted = db
+            .purge_sessions_older_than_days(days)
+            .map_err(|err| err.to_string())?;
+        let saved_deleted = db
+            .purge_saved_sessions_older_than_days(days)
+            .map_err(|err| err.to_string())?;
+        Ok(runtime_deleted + saved_deleted)
+    }) {
+        Ok(deleted) if deleted > 0 => {
+            eprintln!("[respondent] purged {deleted} expired session record(s)");
+        }
+        Ok(_) => {}
+        Err(err) => eprintln!("[respondent] session retention purge failed: {err}"),
+    }
+}
+
+#[tauri::command]
+pub fn list_saved_sessions(
+    state: tauri::State<'_, PersistentSessionDb>,
+) -> Result<Vec<SavedSession>, String> {
+    state.with_db(|db| db.list_saved_sessions().map_err(|err| err.to_string()))
+}
+
+#[tauri::command]
+pub fn upsert_saved_session(
+    state: tauri::State<'_, PersistentSessionDb>,
+    session: SavedSession,
+) -> Result<(), String> {
+    state.with_db(|db| db.upsert_saved_session(&session).map_err(|err| err.to_string()))
+}
+
+#[tauri::command]
+pub fn delete_saved_session(
+    state: tauri::State<'_, PersistentSessionDb>,
+    session_id: String,
+) -> Result<(), String> {
+    validate_session_id(&session_id)?;
+    state.with_db(|db| db.delete_saved_session(&session_id).map_err(|err| err.to_string()))
+}
+
+#[tauri::command]
+pub fn import_legacy_saved_sessions(
+    state: tauri::State<'_, PersistentSessionDb>,
+    sessions: Vec<SavedSession>,
+) -> Result<u64, String> {
+    let mut imported = 0u64;
+    state.with_db(|db| {
+        for session in sessions {
+            db.upsert_saved_session(&session).map_err(|err| err.to_string())?;
+            imported += 1;
+        }
+        Ok(imported)
+    })
+}
+
+#[tauri::command]
 pub fn save_markdown_file(
     app: tauri::AppHandle,
     filename: String,
@@ -380,6 +504,7 @@ pub fn delete_provider_profile(
 ) -> Result<ProviderProfilesResponse, String> {
     let mut store = state.load_store()?;
     delete_profile_in_store(&mut store, &profile_id)?;
+    delete_profile_secrets(&profile_id)?;
     state.save_store(&store)?;
     Ok(store.response())
 }
@@ -422,20 +547,35 @@ pub fn load_document(
     state: tauri::State<'_, Arc<Mutex<DocumentStore>>>,
     name: String,
     content: String,
-) -> DocumentSummary {
-    state.lock().unwrap().load(name, content)
+) -> Result<DocumentSummary, String> {
+    with_document_store(&state, |store| store.load(name, content))
 }
 
 #[tauri::command]
-pub fn unload_document(state: tauri::State<'_, Arc<Mutex<DocumentStore>>>, name: String) {
-    state.lock().unwrap().unload(&name);
+pub fn unload_document(
+    state: tauri::State<'_, Arc<Mutex<DocumentStore>>>,
+    name: String,
+) -> Result<(), String> {
+    with_document_store(&state, |store| {
+        store.unload(&name);
+    })
 }
 
 #[tauri::command]
 pub fn list_documents(
     state: tauri::State<'_, Arc<Mutex<DocumentStore>>>,
-) -> Vec<DocumentSummary> {
-    state.lock().unwrap().list()
+) -> Result<Vec<DocumentSummary>, String> {
+    with_document_store(&state, |store| store.list())
+}
+
+fn with_document_store<T>(
+    state: &tauri::State<'_, Arc<Mutex<DocumentStore>>>,
+    f: impl FnOnce(&mut DocumentStore) -> T,
+) -> Result<T, String> {
+    let mut store = state
+        .lock()
+        .map_err(|_| "Document store lock failed".to_string())?;
+    Ok(f(&mut store))
 }
 
 pub fn merge_provider_settings(
@@ -521,18 +661,18 @@ impl SessionRuntime {
         if using_mock_asr {
             emit_status(
                 &app,
-                SystemStatusEvent::info(
+                SystemStatusEvent::warn(
                     Some(session_id.clone()),
-                    "未设置 OPENAI_API_KEY，正在使用演示 ASR 服务商",
+                    "当前使用演示 ASR 服务商，转写结果不代表真实会议音频",
                 ),
             );
         }
         if using_mock_llm {
             emit_status(
                 &app,
-                SystemStatusEvent::info(
+                SystemStatusEvent::warn(
                     Some(session_id),
-                    "未配置 LLM 服务商，正在使用演示 LLM 服务商",
+                    "当前使用演示 LLM 服务商，建议回复不代表真实模型输出",
                 ),
             );
         }
@@ -595,7 +735,7 @@ pub fn resolve_asr_client(
                     .map_err(|e| e.to_string())?;
                 Ok((Box::new(client), false))
             }
-            None => Ok((Box::new(MockAsrClient::new(session_id)), true)),
+            None => mock_asr_client_or_error(session_id, &provider, "缺少 SILICONFLOW_API_KEY"),
         },
         "openai_realtime" => match get("OPENAI_API_KEY") {
             Some(api_key) => {
@@ -607,7 +747,7 @@ pub fn resolve_asr_client(
                     .map_err(|e| e.to_string())?;
                 Ok((Box::new(client), false))
             }
-            None => Ok((Box::new(MockAsrClient::new(session_id)), true)),
+            None => mock_asr_client_or_error(session_id, &provider, "缺少 OPENAI_API_KEY"),
         },
         "bailian_realtime" => match get("DASHSCOPE_API_KEY") {
             Some(api_key) => {
@@ -631,9 +771,9 @@ pub fn resolve_asr_client(
                     .map_err(|e| e.to_string())?;
                 Ok((Box::new(client), false))
             }
-            None => Ok((Box::new(MockAsrClient::new(session_id)), true)),
+            None => mock_asr_client_or_error(session_id, &provider, "缺少 DASHSCOPE_API_KEY"),
         },
-        _ => Ok((Box::new(MockAsrClient::new(session_id)), true)),
+        _ => mock_asr_client_or_error(session_id, &provider, "未知或不受支持的 ASR 服务商"),
     }
 }
 
@@ -722,7 +862,7 @@ pub fn resolve_reply_client(
                     let client = OpenAiReplyClient::connect(config).map_err(|e| e.to_string())?;
                     Ok((Box::new(client), false))
                 }
-                None => Ok((Box::new(MockReplyClient), true)),
+                None => mock_reply_client_or_error(&provider, "缺少 OPENAI_API_KEY"),
             };
         }
         "dashscope" => compatible(
@@ -768,7 +908,10 @@ pub fn resolve_reply_client(
             let client = OpenAiCompatibleReplyClient::connect(config).map_err(|e| e.to_string())?;
             Ok((Box::new(client), false))
         }
-        None => Ok((Box::new(MockReplyClient), true)),
+        None => mock_reply_client_or_error(
+            &provider,
+            "缺少 API Key、Base URL 或 Model 等必要配置",
+        ),
     }
 }
 
@@ -979,8 +1122,19 @@ fn spawn_asr_bridge(
             while !thread_stop.load(Ordering::Acquire) {
                 match events.recv_timeout(BRIDGE_WAIT) {
                     Ok(event) => {
-                        let _ = app.emit(REALTIME_EVENT_NAME, event.clone());
-                        persist_asr_event(&db, &event);
+                        emit_realtime_event(&app, event.clone());
+                        if let Err(err) = persist_asr_event(&db, &event) {
+                            eprintln!("[respondent] persist ASR event failed: {err}");
+                            if let AsrEvent::Final { session_id, .. } = &event {
+                                emit_status(
+                                    &app,
+                                    SystemStatusEvent::warn(
+                                        Some(session_id.clone()),
+                                        format!("转写事件保存失败：{err}"),
+                                    ),
+                                );
+                            }
+                        }
                         let _ = reply_tx.send(event);
                     }
                     Err(RecvTimeoutError::Timeout) => {}
@@ -1005,8 +1159,19 @@ fn spawn_reply_bridge(
             while !thread_stop.load(Ordering::Acquire) {
                 match events.recv_timeout(BRIDGE_WAIT) {
                     Ok(event) => {
-                        let _ = app.emit(REALTIME_EVENT_NAME, event.clone());
-                        persist_reply_event(&db, &event);
+                        emit_realtime_event(&app, event.clone());
+                        if let Err(err) = persist_reply_event(&db, &event) {
+                            eprintln!("[respondent] persist reply event failed: {err}");
+                            if let ReplyEvent::Final { session_id, .. } = &event {
+                                emit_status(
+                                    &app,
+                                    SystemStatusEvent::warn(
+                                        Some(session_id.clone()),
+                                        format!("建议回复保存失败：{err}"),
+                                    ),
+                                );
+                            }
+                        }
                     }
                     Err(RecvTimeoutError::Timeout) => {}
                     Err(RecvTimeoutError::Disconnected) => break,
@@ -1018,10 +1183,18 @@ fn spawn_reply_bridge(
 }
 
 fn emit_status(app: &tauri::AppHandle, event: SystemStatusEvent) {
-    let _ = app.emit(REALTIME_EVENT_NAME, event);
+    if let Err(err) = app.emit(REALTIME_EVENT_NAME, event) {
+        eprintln!("[respondent] emit system status failed: {err}");
+    }
 }
 
-fn persist_asr_event(db: &PersistentSessionDb, event: &AsrEvent) {
+fn emit_realtime_event<T: Clone + serde::Serialize>(app: &tauri::AppHandle, event: T) {
+    if let Err(err) = app.emit(REALTIME_EVENT_NAME, event) {
+        eprintln!("[respondent] emit realtime event failed: {err}");
+    }
+}
+
+fn persist_asr_event(db: &PersistentSessionDb, event: &AsrEvent) -> Result<(), String> {
     if let AsrEvent::Final {
         session_id,
         text,
@@ -1030,7 +1203,7 @@ fn persist_asr_event(db: &PersistentSessionDb, event: &AsrEvent) {
         ..
     } = event
     {
-        let _ = db.with_db(|db| {
+        db.with_db(|db| {
             db.insert_event(EventInsert {
                 session_id: session_id.clone(),
                 event_type: "transcript".into(),
@@ -1040,11 +1213,12 @@ fn persist_asr_event(db: &PersistentSessionDb, event: &AsrEvent) {
                 ended_at_ms: *ended_at_ms,
             })
             .map_err(|err| err.to_string())
-        });
+        })?;
     }
+    Ok(())
 }
 
-fn persist_reply_event(db: &PersistentSessionDb, event: &ReplyEvent) {
+fn persist_reply_event(db: &PersistentSessionDb, event: &ReplyEvent) -> Result<(), String> {
     if let ReplyEvent::Final {
         session_id,
         text,
@@ -1052,7 +1226,7 @@ fn persist_reply_event(db: &PersistentSessionDb, event: &ReplyEvent) {
         ..
     } = event
     {
-        let _ = db.with_db(|db| {
+        db.with_db(|db| {
             db.insert_event(EventInsert {
                 session_id: session_id.clone(),
                 event_type: "suggestion".into(),
@@ -1062,13 +1236,16 @@ fn persist_reply_event(db: &PersistentSessionDb, event: &ReplyEvent) {
                 ended_at_ms: *received_at_ms,
             })
             .map_err(|err| err.to_string())
-        });
+        })?;
     }
+    Ok(())
 }
 
 fn format_session_markdown(export: &SessionExport) -> String {
     let ended_at = export.ended_at.as_deref().unwrap_or("进行中");
     let mut lines = vec![
+        "> **注意**：导出内容包含会议敏感文本，请妥善保管。".to_string(),
+        String::new(),
         format!("## {}", export.title),
         String::new(),
         format!("- 开始：{}", export.started_at),

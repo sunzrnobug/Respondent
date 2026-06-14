@@ -6,13 +6,16 @@ pub mod docs;
 pub mod llm;
 pub mod provider_config;
 pub mod reply_style_settings;
+pub mod secret_store;
 pub mod session;
 pub mod telemetry;
 pub mod window_visibility;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
+use crate::commands::{REALTIME_EVENT_NAME, SystemStatusEvent};
 use crate::docs::store::DocumentStore;
+use crate::secret_store::verify_keyring_backend;
 use std::sync::{Arc, Mutex};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -32,12 +35,25 @@ pub fn run() {
                 .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
             let provider_config = commands::ProviderConfigStore::open(app.handle())
                 .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+            if let Err(err) = verify_keyring_backend() {
+                eprintln!("[respondent] OS credential store probe failed: {err}");
+                let _ = app.handle().emit(
+                    REALTIME_EVENT_NAME,
+                    SystemStatusEvent::error(
+                        None,
+                        format!(
+                            "凭据库不可用，API 密钥与数据库主密钥将无法安全保存：{err}"
+                        ),
+                    ),
+                );
+            }
             let appearance_settings = appearance_settings::AppearanceSettingsStore::open(app.handle())
                 .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
             let reply_style_settings =
                 reply_style_settings::ReplyStyleSettingsStore::open(app.handle())
                     .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
-            app.manage(db);
+            app.manage(db.clone());
+            commands::purge_expired_sessions_on_startup(&db);
             app.manage(provider_config);
             app.manage(appearance_settings);
             app.manage(Arc::new(reply_style_settings));
@@ -50,6 +66,13 @@ pub fn run() {
             commands::retry_reply,
             commands::export_session_markdown,
             commands::export_session_text,
+            commands::list_session_records,
+            commands::delete_session_record,
+            commands::purge_old_sessions,
+            commands::list_saved_sessions,
+            commands::upsert_saved_session,
+            commands::delete_saved_session,
+            commands::import_legacy_saved_sessions,
             commands::save_markdown_file,
             commands::get_appearance_settings,
             commands::publish_appearance_settings,

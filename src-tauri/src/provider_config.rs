@@ -3,6 +3,11 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
+use crate::secret_store::{
+    hydrate_legacy_settings_secrets, migrate_legacy_plaintext_secrets,
+    prepare_legacy_settings_for_persist,
+};
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderSettings {
@@ -181,8 +186,14 @@ pub fn load_profile_store(
     if profiles_path.exists() {
         let text = std::fs::read_to_string(profiles_path)
             .map_err(|err| format!("Read provider profiles failed: {err}"))?;
-        return serde_json::from_str(&text)
-            .map_err(|err| format!("Parse provider profiles failed: {err}"));
+        let mut store: ProviderProfileStore = serde_json::from_str(&text)
+            .map_err(|err| format!("Parse provider profiles failed: {err}"))?;
+        let migrated = crate::secret_store::migrate_store_plaintext_secrets(&mut store)?;
+        crate::secret_store::hydrate_store_secrets(&mut store)?;
+        if migrated {
+            save_profile_store(profiles_path, &store)?;
+        }
+        return Ok(store);
     }
 
     let legacy = load_provider_settings(legacy_settings_path)?;
@@ -205,11 +216,13 @@ pub fn load_profile_store(
 }
 
 pub fn save_profile_store(path: &Path, store: &ProviderProfileStore) -> Result<(), String> {
+    let mut prepared = store.clone();
+    crate::secret_store::prepare_store_for_persist(&mut prepared)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|err| format!("Create provider profiles directory failed: {err}"))?;
     }
-    let text = serde_json::to_string_pretty(store)
+    let text = serde_json::to_string_pretty(&prepared)
         .map_err(|err| format!("Serialize provider profiles failed: {err}"))?;
     std::fs::write(path, text).map_err(|err| format!("Write provider profiles failed: {err}"))
 }
@@ -315,15 +328,24 @@ pub fn load_provider_settings(path: &Path) -> Result<ProviderSettings, String> {
     }
     let text = std::fs::read_to_string(path)
         .map_err(|err| format!("Read provider config failed: {err}"))?;
-    serde_json::from_str(&text).map_err(|err| format!("Parse provider config failed: {err}"))
+    let mut settings: ProviderSettings = serde_json::from_str(&text)
+        .map_err(|err| format!("Parse provider config failed: {err}"))?;
+    let migrated = migrate_legacy_plaintext_secrets(&mut settings)?;
+    hydrate_legacy_settings_secrets(&mut settings)?;
+    if migrated {
+        save_provider_settings(path, &settings)?;
+    }
+    Ok(settings)
 }
 
 pub fn save_provider_settings(path: &Path, settings: &ProviderSettings) -> Result<(), String> {
+    let mut prepared = settings.clone();
+    prepare_legacy_settings_for_persist(&mut prepared)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|err| format!("Create provider config directory failed: {err}"))?;
     }
-    let text = serde_json::to_string_pretty(settings)
+    let text = serde_json::to_string_pretty(&prepared)
         .map_err(|err| format!("Serialize provider config failed: {err}"))?;
     std::fs::write(path, text).map_err(|err| format!("Write provider config failed: {err}"))
 }

@@ -1,0 +1,12 @@
+# Windows: SQLCipher (bundled-sqlcipher) links against Shining Light OpenSSL Dev.
+# Install: winget install ShiningLight.OpenSSL.Dev
+# Light/runtime-only packages do not include headers or .lib files.
+
+[env]
+OPENSSL_DIR = "C:\\Program Files\\OpenSSL-Win64"
+OPENSSL_LIB_DIR = "C:\\Program Files\\OpenSSL-Win64\\lib\\VC\\x64\\MD"
+
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+  "-L", "native=C:\\Program Files\\OpenSSL-Win64\\lib\\VC\\x64\\MD",
+]

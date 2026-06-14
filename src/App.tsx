@@ -70,8 +70,9 @@ import {
   createSavedSession,
   exportSavedSessionMarkdown,
   loadSavedSessions,
-  persistSavedSessions,
-  removeSavedSession,
+  migrateLegacySavedSessionsFromLocalStorage,
+  persistSavedSession,
+  removeSavedSessionById,
   type SavedSession,
 } from "./state/sessionHistory";
 import {
@@ -156,11 +157,6 @@ function createSessionId() {
   return `session-${crypto.randomUUID()}`;
 }
 
-function loadInitialSavedSessions(): SavedSession[] {
-  if (typeof window === "undefined") return [];
-  return loadSavedSessions(window.localStorage);
-}
-
 function loadPendingSaveSession(): SessionState | null {
   if (typeof window === "undefined") return null;
   const raw = window.localStorage.getItem(PENDING_SAVE_SESSION_STORAGE_KEY);
@@ -233,9 +229,7 @@ export default function App() {
   const [savePromptOpen, setSavePromptOpen] = useState(false);
   const [pendingSaveSession, setPendingSaveSession] =
     useState<SessionState | null>(null);
-  const [savedSessions, setSavedSessions] = useState<SavedSession[]>(() =>
-    loadInitialSavedSessions(),
-  );
+  const [savedSessions, setSavedSessions] = useState<SavedSession[]>([]);
   const [selectedSession, setSelectedSession] = useState<SavedSession | null>(
     null,
   );
@@ -343,8 +337,24 @@ export default function App() {
   }, [appearanceTheme]);
 
   useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      if (isTauriRuntime()) {
+        await migrateLegacySavedSessionsFromLocalStorage();
+      }
+      const sessions = await loadSavedSessions();
+      if (!cancelled) {
+        setSavedSessions(sessions);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     const refreshSavedSessions = () => {
-      setSavedSessions(loadInitialSavedSessions());
+      void loadSavedSessions().then(setSavedSessions);
     };
     window.addEventListener("focus", refreshSavedSessions);
     return () => window.removeEventListener("focus", refreshSavedSessions);
@@ -696,14 +706,11 @@ export default function App() {
       return;
     }
     const saved = createSavedSession(source);
-    setSavedSessions((current) => {
-      const next = [
-        saved,
-        ...current.filter((item) => item.id !== saved.id),
-      ];
-      persistSavedSessions(window.localStorage, next);
-      return next;
-    });
+    await persistSavedSession(saved);
+    setSavedSessions((current) => [
+      saved,
+      ...current.filter((item) => item.id !== saved.id),
+    ]);
     setSelectedSession(saved);
     setSavePromptOpen(false);
     setPendingSaveSession(null);
@@ -723,16 +730,11 @@ export default function App() {
   }
 
   function deleteSavedSessionById(sessionId: string) {
-    setSavedSessions((current) => {
-      const next = removeSavedSession(
-        window.localStorage,
-        current,
-        sessionId,
-      );
+    void removeSavedSessionById(savedSessions, sessionId).then((next) => {
+      setSavedSessions(next);
       setSelectedSession((selected) =>
         selected?.id === sessionId ? (next[0] ?? null) : selected,
       );
-      return next;
     });
   }
 

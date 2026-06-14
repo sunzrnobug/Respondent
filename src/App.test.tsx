@@ -44,6 +44,40 @@ function mockTauriRuntime() {
   });
 }
 
+function createMemoryStorage() {
+  const storage = new Map<string, string>();
+  return {
+    getItem: (key: string) => storage.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      storage.set(key, value);
+    },
+    removeItem: (key: string) => {
+      storage.delete(key);
+    },
+    clear: () => storage.clear(),
+    key: () => null,
+    length: 0,
+  } as Storage;
+}
+
+function defaultTauriInvoke(command: string): unknown {
+  if (command === "list_saved_sessions") return [];
+  if (command === "import_legacy_saved_sessions") return 0;
+  if (command === "upsert_saved_session") return undefined;
+  if (command === "delete_saved_session") return undefined;
+  if (command === "list_provider_profiles") {
+    return { profiles: [], active: { llm: null, asr: null } };
+  }
+  return [];
+}
+
+async function saveSessionFromPrompt() {
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "保存会话" }));
+    await Promise.resolve();
+  });
+}
+
 describe("App", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -245,7 +279,7 @@ describe("App", () => {
       await vi.advanceTimersByTimeAsync(2200);
     });
     fireEvent.click(screen.getByTitle("结束"));
-    fireEvent.click(screen.getByRole("button", { name: "保存会话" }));
+    await saveSessionFromPrompt();
 
     fireEvent.click(screen.getByTitle("会话历史"));
     const historyDialog = screen.getByRole("dialog", {
@@ -296,7 +330,7 @@ describe("App", () => {
       await vi.advanceTimersByTimeAsync(2200);
     });
     fireEvent.click(screen.getByTitle("结束"));
-    fireEvent.click(screen.getByRole("button", { name: "保存会话" }));
+    await saveSessionFromPrompt();
     fireEvent.click(screen.getByTitle("会话历史"));
 
     const historyDialog = screen.getByRole("dialog", {
@@ -330,31 +364,30 @@ describe("App", () => {
   it("writes markdown through Tauri when exporting from a detached history window", async () => {
     mockTauriRuntime();
     window.history.replaceState(null, "", "/?dialog=conversation-history");
-    localStorage.setItem(
-      "respondent.savedSessions",
-      JSON.stringify([
-        {
-          id: "saved-1",
-          title: "测试导出",
-          date: "2026-06-14",
-          startedAt: "2026-06-14T10:00:00.000Z",
-          endedAt: "2026-06-14T10:01:00.000Z",
-          turns: [{ transcript: "测试转写", suggestion: "测试建议" }],
-          systemMessages: [],
-        },
-      ]),
-    );
+    const savedSessions = [
+      {
+        id: "saved-1",
+        title: "测试导出",
+        date: "2026-06-14",
+        startedAt: "2026-06-14T10:00:00.000Z",
+        endedAt: "2026-06-14T10:01:00.000Z",
+        turns: [{ transcript: "测试转写", suggestion: "测试建议" }],
+        systemMessages: [],
+      },
+    ];
     invokeMock.mockImplementation(async (command: string) => {
-      if (command === "list_provider_profiles") {
-        return { profiles: [], active: { llm: null, asr: null } };
-      }
+      if (command === "list_saved_sessions") return savedSessions;
       if (command === "save_markdown_file") {
         return "C:\\Users\\JackieLoveUnique\\Downloads\\测试导出.md";
       }
-      return [];
+      return defaultTauriInvoke(command);
     });
 
     render(<App />);
+
+    await vi.waitFor(() => {
+      expect(screen.getByRole("button", { name: "导出 Markdown" })).toBeInTheDocument();
+    });
 
     fireEvent.click(screen.getByRole("button", { name: "导出 Markdown" }));
 
@@ -385,40 +418,39 @@ describe("App", () => {
   it("clears export feedback when switching to another saved session", async () => {
     mockTauriRuntime();
     window.history.replaceState(null, "", "/?dialog=conversation-history");
-    localStorage.setItem(
-      "respondent.savedSessions",
-      JSON.stringify([
-        {
-          id: "saved-1",
-          title: "第一个会话",
-          date: "2026-06-14",
-          startedAt: "2026-06-14T10:00:00.000Z",
-          endedAt: "2026-06-14T10:01:00.000Z",
-          turns: [{ transcript: "第一个转写", suggestion: "第一个建议" }],
-          systemMessages: [],
-        },
-        {
-          id: "saved-2",
-          title: "第二个会话",
-          date: "2026-06-13",
-          startedAt: "2026-06-13T10:00:00.000Z",
-          endedAt: "2026-06-13T10:01:00.000Z",
-          turns: [{ transcript: "第二个转写", suggestion: "第二个建议" }],
-          systemMessages: [],
-        },
-      ]),
-    );
+    const savedSessions = [
+      {
+        id: "saved-1",
+        title: "第一个会话",
+        date: "2026-06-14",
+        startedAt: "2026-06-14T10:00:00.000Z",
+        endedAt: "2026-06-14T10:01:00.000Z",
+        turns: [{ transcript: "第一个转写", suggestion: "第一个建议" }],
+        systemMessages: [],
+      },
+      {
+        id: "saved-2",
+        title: "第二个会话",
+        date: "2026-06-13",
+        startedAt: "2026-06-13T10:00:00.000Z",
+        endedAt: "2026-06-13T10:01:00.000Z",
+        turns: [{ transcript: "第二个转写", suggestion: "第二个建议" }],
+        systemMessages: [],
+      },
+    ];
     invokeMock.mockImplementation(async (command: string) => {
-      if (command === "list_provider_profiles") {
-        return { profiles: [], active: { llm: null, asr: null } };
-      }
+      if (command === "list_saved_sessions") return savedSessions;
       if (command === "save_markdown_file") {
         return "C:\\Users\\JackieLoveUnique\\Downloads\\第一个会话.md";
       }
-      return [];
+      return defaultTauriInvoke(command);
     });
 
     render(<App />);
+
+    await vi.waitFor(() => {
+      expect(screen.getByRole("button", { name: "导出 Markdown" })).toBeInTheDocument();
+    });
 
     fireEvent.click(screen.getByRole("button", { name: "导出 Markdown" }));
 
@@ -448,7 +480,7 @@ describe("App", () => {
       await vi.advanceTimersByTimeAsync(2200);
     });
     fireEvent.click(screen.getByTitle("结束"));
-    fireEvent.click(screen.getByRole("button", { name: "保存会话" }));
+    await saveSessionFromPrompt();
 
     fireEvent.click(screen.getByTitle("会话历史"));
     const historyDialog = screen.getByRole("dialog", {
@@ -458,7 +490,10 @@ describe("App", () => {
       name: "删除",
     });
 
-    fireEvent.click(deleteButton);
+    await act(async () => {
+      fireEvent.click(deleteButton);
+      await Promise.resolve();
+    });
 
     expect(
       within(historyDialog).getByText("暂无已保存的会话。"),
@@ -477,7 +512,7 @@ describe("App", () => {
       await vi.advanceTimersByTimeAsync(3600);
     });
     fireEvent.click(screen.getByTitle("结束"));
-    fireEvent.click(screen.getByRole("button", { name: "保存会话" }));
+    await saveSessionFromPrompt();
 
     fireEvent.click(screen.getByTitle("会话历史"));
     fireEvent.click(screen.getByTitle("关闭会话历史"));

@@ -74,9 +74,9 @@ npm run tauri:build
 
 ## Provider 配置
 
-桌面应用顶部工具栏有供应商配置入口，可同时配置 LLM 和 ASR。手动配置会保存到应用数据目录的 `provider-config.json`，启动 native session 时优先使用手动配置；手动配置不完整时回退到环境变量；仍不可用时使用 mock provider。
+桌面应用顶部工具栏有供应商配置入口，可同时配置 LLM 和 ASR。手动配置会保存到应用数据目录的 `provider-profiles.json`（仅元数据），启动 native session 时优先使用手动配置；手动配置不完整时回退到环境变量；仍不可用时，**调试构建**或显式设置 `RESPONDENT_ALLOW_MOCK=1` 才允许演示 mock；**发布构建默认阻断隐式 mock**。
 
-API Key 不会在配置摘要中回显，也不会写入前端 state 的加载结果。当前版本仍使用本地 JSON 文件保存密钥，后续可迁移到系统凭据管理器。
+API Key 不会在配置摘要中回显，也不会写入前端 state 的加载结果。密钥通过系统凭据库保存（Windows Credential Manager / macOS Keychain / Linux Secret Service，`keyring` 已启用 `windows-native` 等平台 feature）；JSON 文件只保留 profile 元数据。若凭据库探针失败，不会剥离 JSON 中的历史明文密钥。首次加载在探针通过后会自动迁移。
 
 ### LLM provider
 

@@ -5,6 +5,7 @@ use respondent_lib::provider_config::{
 };
 
 fn settings_path() -> std::path::PathBuf {
+    std::env::set_var("RESPONDENT_SECRET_BACKEND", "memory");
     let unique = format!(
         "respondent-provider-config-test-{}.json",
         std::time::SystemTime::now()
@@ -59,8 +60,10 @@ fn saves_and_loads_provider_settings() {
 
     save_provider_settings(&path, &settings).unwrap();
     let loaded = load_provider_settings(&path).unwrap();
+    let raw = std::fs::read_to_string(&path).unwrap();
 
     assert_eq!(loaded.llm.unwrap().api_key.as_deref(), Some("sk-test"));
+    assert!(!raw.contains("sk-test"));
     let _ = std::fs::remove_file(path);
 }
 

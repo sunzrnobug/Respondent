@@ -12,9 +12,12 @@
     "dialog-documents"
   ],
   "permissions": [
-    "core:default",
+    "core:path:default",
     "core:event:default",
-    "opener:default",
+    "core:app:default",
+    "core:resources:default",
+    "core:menu:default",
+    "core:tray:default",
     "core:webview:allow-create-webview-window",
     "core:window:allow-inner-size",
     "core:window:allow-scale-factor",
@@ -23,6 +26,7 @@
     "core:window:allow-set-focus",
     "core:window:allow-set-size",
     "core:window:allow-close",
+    "opener:allow-reveal-item-in-dir",
     "global-shortcut:allow-register",
     "global-shortcut:allow-unregister",
     "global-shortcut:allow-is-registered"

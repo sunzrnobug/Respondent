@@ -1,6 +1,7 @@
 use respondent_lib::commands::{
-    end_session_for_test, export_session_markdown_for_test, export_session_text_for_test,
-    merge_provider_settings, resolve_asr_provider_name, resolve_asr_provider_name_with_settings,
+    allow_mock_providers, end_session_for_test, export_session_markdown_for_test,
+    export_session_text_for_test, merge_provider_settings, resolve_asr_client,
+    resolve_asr_provider_name, resolve_asr_provider_name_with_settings, resolve_reply_client,
     resolve_reply_provider_name, resolve_reply_provider_name_with_settings, start_session_for_test,
     SystemStatusEvent,
 };
@@ -50,6 +51,33 @@ fn system_status_serializes_to_frontend_contract() {
     assert_eq!(value["level"], "info");
     assert_eq!(value["message"], "ready");
     assert!(value["receivedAtMs"].as_i64().unwrap() > 0);
+}
+
+#[test]
+fn provider_missing_key_errors_when_mock_disabled() {
+    let previous = std::env::var("RESPONDENT_ALLOW_MOCK").ok();
+    std::env::set_var("RESPONDENT_ALLOW_MOCK", "0");
+
+    let llm = resolve_reply_client(&env(&[]));
+    let asr = resolve_asr_client("s1", &env(&[]));
+    assert!(llm.is_err());
+    assert!(asr.is_err());
+
+    match previous {
+        Some(value) => std::env::set_var("RESPONDENT_ALLOW_MOCK", value),
+        None => std::env::remove_var("RESPONDENT_ALLOW_MOCK"),
+    }
+}
+
+#[test]
+fn allow_mock_defaults_to_debug_build_behavior() {
+    let previous = std::env::var("RESPONDENT_ALLOW_MOCK").ok();
+    std::env::remove_var("RESPONDENT_ALLOW_MOCK");
+    assert_eq!(allow_mock_providers(), cfg!(debug_assertions));
+    match previous {
+        Some(value) => std::env::set_var("RESPONDENT_ALLOW_MOCK", value),
+        None => std::env::remove_var("RESPONDENT_ALLOW_MOCK"),
+    }
 }
 
 #[test]

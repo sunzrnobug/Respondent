@@ -200,3 +200,38 @@ export async function saveReplyStyleSettings(
 ): Promise<ReplyStyleSettings> {
   return invoke<ReplyStyleSettings>("save_reply_style_settings", { settings });
 }
+
+export type SavedSessionTurn = {
+  transcript: string;
+  suggestion?: string | null;
+};
+
+export type SavedSessionRecord = {
+  id: string;
+  title: string;
+  date: string;
+  startedAt: string;
+  endedAt: string;
+  turns: SavedSessionTurn[];
+  systemMessages: string[];
+};
+
+export async function listSavedSessions(): Promise<SavedSessionRecord[]> {
+  return invoke<SavedSessionRecord[]>("list_saved_sessions");
+}
+
+export async function upsertSavedSession(
+  session: SavedSessionRecord,
+): Promise<void> {
+  await invoke("upsert_saved_session", { session });
+}
+
+export async function deleteSavedSession(sessionId: string): Promise<void> {
+  await invoke("delete_saved_session", { sessionId });
+}
+
+export async function importLegacySavedSessions(
+  sessions: SavedSessionRecord[],
+): Promise<number> {
+  return invoke<number>("import_legacy_saved_sessions", { sessions });
+}
