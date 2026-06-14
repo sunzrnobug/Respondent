@@ -1,4 +1,4 @@
-import { emit, listen } from "@tauri-apps/api/event";
+import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import {
   APPEARANCE_SETTINGS_BROADCAST_CHANNEL,

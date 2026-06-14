@@ -133,5 +133,5 @@ export function buildAppearanceShellStyle(
     "--window-opacity": (settings.windowOpacity / 100).toFixed(2),
     "--window-blur": `${settings.windowBlur}px`,
     ...themeTokens,
-  } as CSSProperties;
+  } as unknown as CSSProperties;
 }

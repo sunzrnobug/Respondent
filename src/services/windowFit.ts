@@ -3,7 +3,10 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { isTauriRuntime } from "./realtimeBridge";
 
-const windowFitRemeasureRegistry = new WeakMap<HTMLElement, () => void>();
+const windowFitRemeasureRegistry = new WeakMap<
+  HTMLElement,
+  (options?: { forceContentShrink?: boolean }) => void
+>();
 
 function measureNaturalContentHeight(element: HTMLElement): number {
   const previousMinHeight = element.style.minHeight;
@@ -20,7 +23,8 @@ export function remeasureMainWindowFit(
   element: HTMLElement | null,
   options?: { forceContentShrink?: boolean },
 ) {
-  windowFitRemeasureRegistry.get(element ?? undefined)?.(options);
+  if (!element) return;
+  windowFitRemeasureRegistry.get(element)?.(options);
 }
 
 export function setupMainWindowFit(element: HTMLElement | null): () => void {
@@ -172,7 +176,7 @@ export function setupMainWindowFit(element: HTMLElement | null): () => void {
   windowFitRemeasureRegistry.set(element, remeasure);
 
   globalThis.addEventListener("resize", handleResize);
-  const mutationObserver = new MutationObserver(remeasure);
+  const mutationObserver = new MutationObserver(() => remeasure());
   mutationObserver.observe(element, {
     attributes: true,
     characterData: true,
@@ -180,7 +184,7 @@ export function setupMainWindowFit(element: HTMLElement | null): () => void {
     subtree: true,
   });
 
-  const resizeObserver = new ResizeObserver(remeasure);
+  const resizeObserver = new ResizeObserver(() => remeasure());
   resizeObserver.observe(element);
 
   sync(true);

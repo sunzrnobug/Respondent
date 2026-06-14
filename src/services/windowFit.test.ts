@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const setSizeMock = vi.hoisted(() => vi.fn(async () => undefined));
+const setSizeMock = vi.hoisted(() =>
+  vi.fn(async (_size: { width: number; height: number }) => undefined),
+);
 const innerSizeMock = vi.hoisted(() =>
   vi.fn(async () => ({ width: 420, height: 520 })),
 );
