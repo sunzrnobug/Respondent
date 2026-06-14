@@ -31,6 +31,7 @@ vi.mock("./services/dialogWindows", () => ({
 
 vi.mock("./services/windowFit", () => ({
   setupMainWindowFit: vi.fn(() => () => undefined),
+  remeasureMainWindowFit: vi.fn(),
 }));
 
 function mockTauriRuntime() {

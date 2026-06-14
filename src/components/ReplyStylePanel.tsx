@@ -1,9 +1,29 @@
-import { useEffect, useState } from "react";
-import { MessageSquareText, Save, X } from "lucide-react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  Bookmark,
+  ChevronLeft,
+  ChevronRight,
+  MessageSquareText,
+  Save,
+  Trash2,
+  X,
+} from "lucide-react";
 import {
   getReplyStyleSettings,
   saveReplyStyleSettings,
 } from "../services/tauriApi";
+import {
+  deleteReplyStylePreset,
+  listReplyStylePresets,
+  saveReplyStylePreset,
+  type ReplyStylePreset,
+} from "../state/replyStylePresets";
+import { setupDialogWindowFit } from "../services/windowFit";
+import {
+  REPLY_STYLE_PRESETS_PER_PAGE,
+  REPLY_STYLE_TEXTAREA_MAX_HEIGHT_PX,
+  REPLY_STYLE_TEXTAREA_MIN_HEIGHT_PX,
+} from "../domain/replyStyleLayout";
 
 const REPLY_STYLE_EXAMPLES = [
   {
@@ -20,20 +40,66 @@ const REPLY_STYLE_EXAMPLES = [
   },
 ] as const;
 
+function syncTextareaHeight(textarea: HTMLTextAreaElement) {
+  textarea.style.height = "auto";
+  const nextHeight = Math.min(
+    REPLY_STYLE_TEXTAREA_MAX_HEIGHT_PX,
+    Math.max(REPLY_STYLE_TEXTAREA_MIN_HEIGHT_PX, textarea.scrollHeight),
+  );
+  textarea.style.height = `${nextHeight}px`;
+}
+
 type ReplyStylePanelProps = {
   onClose: () => void;
   closeTitle?: string;
   className?: string;
+  fitWindow?: boolean;
 };
 
 export function ReplyStylePanel({
   onClose,
   closeTitle = "关闭回复风格设置",
   className = "modalPanel replyStylePanel",
+  fitWindow = false,
 }: ReplyStylePanelProps) {
+  const panelRef = useRef<HTMLElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [replyStylePrompt, setReplyStylePrompt] = useState("");
   const [status, setStatus] = useState("");
   const [saving, setSaving] = useState(false);
+  const [presets, setPresets] = useState<ReplyStylePreset[]>(() =>
+    listReplyStylePresets(),
+  );
+  const [presetName, setPresetName] = useState("");
+  const [editingPresetId, setEditingPresetId] = useState<string | null>(null);
+  const [savingPreset, setSavingPreset] = useState(false);
+  const [presetPage, setPresetPage] = useState(0);
+
+  const presetPageCount = Math.max(
+    1,
+    Math.ceil(presets.length / REPLY_STYLE_PRESETS_PER_PAGE),
+  );
+  const pagedPresets = useMemo(() => {
+    const start = presetPage * REPLY_STYLE_PRESETS_PER_PAGE;
+    return presets.slice(start, start + REPLY_STYLE_PRESETS_PER_PAGE);
+  }, [presets, presetPage]);
+
+  useEffect(() => {
+    setPresetPage((page) => Math.min(page, presetPageCount - 1));
+  }, [presetPageCount]);
+
+  useLayoutEffect(() => {
+    if (textareaRef.current) {
+      syncTextareaHeight(textareaRef.current);
+    }
+  }, [replyStylePrompt]);
+
+  useEffect(() => {
+    if (!fitWindow) {
+      return undefined;
+    }
+    return setupDialogWindowFit(panelRef.current);
+  }, [fitWindow]);
 
   useEffect(() => {
     void getReplyStyleSettings()
@@ -63,8 +129,81 @@ export function ReplyStylePanel({
     }
   }
 
+  function applyExamplePrompt(text: string) {
+    setReplyStylePrompt(text);
+    setEditingPresetId(null);
+    setPresetName("");
+    setStatus("");
+  }
+
+  function applyPreset(preset: ReplyStylePreset) {
+    setReplyStylePrompt(preset.userPrompt);
+    setEditingPresetId(preset.id);
+    setPresetName(preset.name);
+    setStatus("");
+  }
+
+  function savePreset() {
+    setSavingPreset(true);
+    setStatus("");
+    try {
+      const nextPresets = saveReplyStylePreset(
+        presetName,
+        replyStylePrompt,
+        editingPresetId,
+      );
+      setPresets(nextPresets);
+      const savedPreset = nextPresets.find(
+        (preset) =>
+          preset.id === editingPresetId ||
+          preset.name === presetName.trim(),
+      );
+      if (savedPreset) {
+        setEditingPresetId(savedPreset.id);
+        setPresetName(savedPreset.name);
+        const savedIndex = nextPresets.findIndex(
+          (preset) => preset.id === savedPreset.id,
+        );
+        if (savedIndex >= 0) {
+          setPresetPage(Math.floor(savedIndex / REPLY_STYLE_PRESETS_PER_PAGE));
+        }
+      }
+      setStatus(editingPresetId ? "预设已更新" : "预设已保存");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "保存预设失败");
+    } finally {
+      setSavingPreset(false);
+    }
+  }
+
+  function removePreset(presetId: string) {
+    setStatus("");
+    try {
+      const deletedIndex = presets.findIndex((preset) => preset.id === presetId);
+      const nextPresets = deleteReplyStylePreset(presetId);
+      setPresets(nextPresets);
+      if (deletedIndex >= 0) {
+        const nextPageCount = Math.max(
+          1,
+          Math.ceil(nextPresets.length / REPLY_STYLE_PRESETS_PER_PAGE),
+        );
+        setPresetPage((page) =>
+          Math.min(page, Math.max(0, nextPageCount - 1)),
+        );
+      }
+      if (editingPresetId === presetId) {
+        setEditingPresetId(null);
+        setPresetName("");
+      }
+      setStatus("预设已删除");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "删除预设失败");
+    }
+  }
+
   return (
     <section
+      ref={panelRef}
       aria-labelledby="reply-style-title"
       className={className}
       role="dialog"
@@ -94,12 +233,17 @@ export function ReplyStylePanel({
         <label className="replyStyleField">
           <span>回复风格提示词</span>
           <textarea
+            ref={textareaRef}
             className="replyStyleTextarea"
             value={replyStylePrompt}
-            onChange={(event) => setReplyStylePrompt(event.target.value)}
+            onChange={(event) => {
+              setReplyStylePrompt(event.target.value);
+              setStatus("");
+              syncTextareaHeight(event.target);
+            }}
             placeholder="例如：请回答得更详细、有层次。先给结论，再分 2-3 点说明原因。保持像真人在会议里说话。"
             maxLength={2000}
-            rows={5}
+            rows={4}
           />
         </label>
 
@@ -115,13 +259,128 @@ export function ReplyStylePanel({
                 key={example.label}
                 type="button"
                 className="replyStyleExampleButton"
-                onClick={() => setReplyStylePrompt(example.text)}
+                onClick={() => applyExamplePrompt(example.text)}
               >
                 {example.label}
               </button>
             ))}
           </div>
         </div>
+
+        <section
+          className="replyStylePresetsSection"
+          aria-label="已保存的回复风格预设"
+        >
+          <div className="replyStylePresetsHeader">
+            <div className="replyStylePresetsHeaderIcon" aria-hidden="true">
+              <Bookmark size={15} />
+            </div>
+            <div>
+              <span className="replyStyleExamplesLabel">我的预设</span>
+              <div className="replyStylePresetsMeta">
+                {presets.length} 个已保存
+              </div>
+            </div>
+          </div>
+
+          <div className="replyStylePresetSaveRow">
+            <input
+              className="replyStylePresetNameInput"
+              value={presetName}
+              onChange={(event) => {
+                const nextName = event.target.value;
+                setPresetName(nextName);
+                if (editingPresetId) {
+                  const selectedPreset = presets.find(
+                    (preset) => preset.id === editingPresetId,
+                  );
+                  if (selectedPreset && nextName.trim() !== selectedPreset.name) {
+                    setEditingPresetId(null);
+                  }
+                }
+                setStatus("");
+              }}
+              placeholder="输入预设名称，例如：产品评审"
+              maxLength={40}
+            />
+            <button
+              type="button"
+              className="secondaryButton replyStylePresetSaveButton"
+              disabled={savingPreset || !presetName.trim() || !replyStylePrompt.trim()}
+              onClick={() => savePreset()}
+            >
+              {editingPresetId ? "更新预设" : "保存预设"}
+            </button>
+          </div>
+
+          {presets.length === 0 ? (
+            <div className="replyStylePresetsEmpty">
+              保存常用提示词后，可在此一键选用。
+            </div>
+          ) : (
+            <>
+              <ul className="replyStylePresetsList">
+                {pagedPresets.map((preset) => (
+                  <li className="replyStylePresetItem" key={preset.id}>
+                    <button
+                      type="button"
+                      className={
+                        editingPresetId === preset.id
+                          ? "replyStylePresetButton selected"
+                          : "replyStylePresetButton"
+                      }
+                      onClick={() => applyPreset(preset)}
+                      title={preset.userPrompt}
+                    >
+                      {preset.name}
+                    </button>
+                    <button
+                      type="button"
+                      className="replyStylePresetDelete"
+                      title={`删除 ${preset.name}`}
+                      onClick={() => removePreset(preset.id)}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              {presets.length > REPLY_STYLE_PRESETS_PER_PAGE ? (
+                <div className="replyStylePresetsPagination">
+                  <button
+                    type="button"
+                    className="replyStylePresetsPageButton"
+                    disabled={presetPage <= 0}
+                    onClick={() =>
+                      setPresetPage((page) => Math.max(0, page - 1))
+                    }
+                    title="上一页"
+                  >
+                    <ChevronLeft size={15} aria-hidden="true" />
+                    上一页
+                  </button>
+                  <span className="replyStylePresetsPageStatus">
+                    第 {presetPage + 1} / {presetPageCount} 页
+                  </span>
+                  <button
+                    type="button"
+                    className="replyStylePresetsPageButton"
+                    disabled={presetPage >= presetPageCount - 1}
+                    onClick={() =>
+                      setPresetPage((page) =>
+                        Math.min(presetPageCount - 1, page + 1),
+                      )
+                    }
+                    title="下一页"
+                  >
+                    下一页
+                    <ChevronRight size={15} aria-hidden="true" />
+                  </button>
+                </div>
+              ) : null}
+            </>
+          )}
+        </section>
       </div>
 
       <div className="modalFooter replyStylePanelFooter">
@@ -130,7 +389,9 @@ export function ReplyStylePanel({
           <button
             type="button"
             className="secondaryButton"
-            onClick={() => setReplyStylePrompt("")}
+            onClick={() => {
+              applyExamplePrompt("");
+            }}
           >
             恢复默认
           </button>

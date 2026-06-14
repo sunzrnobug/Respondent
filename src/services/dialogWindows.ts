@@ -47,9 +47,9 @@ const DIALOG_SPECS: Record<DialogWindowKind, DialogWindowSpec> = {
     label: "dialog-reply-style",
     title: "回复风格",
     width: 480,
-    height: 520,
+    height: 480,
     minWidth: 420,
-    minHeight: 480,
+    minHeight: 360,
   },
   "save-session": {
     label: "dialog-save-session",

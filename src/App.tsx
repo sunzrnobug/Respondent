@@ -64,7 +64,7 @@ import {
   listenNativeRealtimeEvents,
 } from "./services/realtimeBridge";
 import { setupEnterVisibilityToggle } from "./services/windowVisibility";
-import { setupMainWindowFit } from "./services/windowFit";
+import { setupMainWindowFit, remeasureMainWindowFit } from "./services/windowFit";
 import {
   buildSessionTurns,
   createSavedSession,
@@ -356,6 +356,15 @@ export default function App() {
     if (dialogKind) return;
     return setupMainWindowFit(shellRef.current);
   }, [dialogKind]);
+
+  useEffect(() => {
+    if (dialogKind) return;
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        remeasureMainWindowFit(shellRef.current, { forceContentShrink: true });
+      });
+    });
+  }, [historyOpen, currentHistoryExpanded, dialogKind]);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -906,7 +915,7 @@ export default function App() {
       <main
         className={`dialogWindowRoot ${
           appearanceTheme === "light" ? "themeLight" : ""
-        }`}
+        } ${dialogKind === "reply-style" ? "dialogWindowRootFitContent" : ""}`}
         style={shellStyle}
       >
         {dialogKind === "appearance" ? (
@@ -962,6 +971,7 @@ export default function App() {
         {dialogKind === "reply-style" ? (
           <ReplyStylePanel
             className="modalPanel replyStylePanel detachedPanel"
+            fitWindow
             onClose={() => void closeCurrentDialogWindow()}
           />
         ) : null}

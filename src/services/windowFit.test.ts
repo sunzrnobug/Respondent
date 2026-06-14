@@ -33,7 +33,7 @@ vi.mock("./realtimeBridge", () => ({
   isTauriRuntime: () => true,
 }));
 
-import { setupMainWindowFit } from "./windowFit";
+import { remeasureMainWindowFit, setupDialogWindowFit, setupMainWindowFit } from "./windowFit";
 
 async function flushWindowFit() {
   for (let index = 0; index < 3; index += 1) {
@@ -45,6 +45,25 @@ async function flushWindowFit() {
 
 describe("setupMainWindowFit", () => {
   let mutationCallback: MutationCallback | null = null;
+
+  function mockShellHeight(element: HTMLElement, height: number) {
+    Object.defineProperty(element, "scrollHeight", {
+      configurable: true,
+      value: height,
+    });
+    element.getBoundingClientRect = () =>
+      ({
+        width: 420,
+        height,
+        top: 0,
+        left: 0,
+        right: 420,
+        bottom: height,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }) as DOMRect;
+  }
 
   beforeEach(() => {
     setSizeMock.mockClear();
@@ -72,6 +91,15 @@ describe("setupMainWindowFit", () => {
         disconnect() {}
       },
     );
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe = vi.fn();
+        unobserve = vi.fn();
+        disconnect = vi.fn();
+        constructor(_callback: ResizeObserverCallback) {}
+      },
+    );
   });
 
   afterEach(() => {
@@ -80,18 +108,7 @@ describe("setupMainWindowFit", () => {
 
   it("fits the main window height to content on startup", async () => {
     const element = document.createElement("main");
-    element.getBoundingClientRect = () =>
-      ({
-        width: 420,
-        height: 388,
-        top: 0,
-        left: 0,
-        right: 420,
-        bottom: 388,
-        x: 0,
-        y: 0,
-        toJSON: () => ({}),
-      }) as DOMRect;
+    mockShellHeight(element, 388);
 
     const cleanup = setupMainWindowFit(element);
     await flushWindowFit();
@@ -106,18 +123,7 @@ describe("setupMainWindowFit", () => {
 
   it("stretches the shell when the native window is manually resized taller", async () => {
     const element = document.createElement("main");
-    element.getBoundingClientRect = () =>
-      ({
-        width: 420,
-        height: 388,
-        top: 0,
-        left: 0,
-        right: 420,
-        bottom: 388,
-        x: 0,
-        y: 0,
-        toJSON: () => ({}),
-      }) as DOMRect;
+    mockShellHeight(element, 388);
 
     const cleanup = setupMainWindowFit(element);
     await flushWindowFit();
@@ -135,18 +141,7 @@ describe("setupMainWindowFit", () => {
 
   it("does not resize on startup when content already matches the window height", async () => {
     const element = document.createElement("main");
-    element.getBoundingClientRect = () =>
-      ({
-        width: 420,
-        height: 520,
-        top: 0,
-        left: 0,
-        right: 420,
-        bottom: 520,
-        x: 0,
-        y: 0,
-        toJSON: () => ({}),
-      }) as DOMRect;
+    mockShellHeight(element, 520);
 
     const cleanup = setupMainWindowFit(element);
     await flushWindowFit();
@@ -159,18 +154,7 @@ describe("setupMainWindowFit", () => {
 
   it("does not include hidden scrollable content in the native window size", async () => {
     const element = document.createElement("main");
-    element.getBoundingClientRect = () =>
-      ({
-        width: 420,
-        height: 300,
-        top: 0,
-        left: 0,
-        right: 420,
-        bottom: 300,
-        x: 0,
-        y: 0,
-        toJSON: () => ({}),
-      }) as DOMRect;
+    mockShellHeight(element, 300);
     Object.defineProperty(element, "scrollHeight", {
       configurable: true,
       value: 520,
@@ -194,18 +178,8 @@ describe("setupMainWindowFit", () => {
   it("grows the window when expanded content exceeds the current height", async () => {
     const element = document.createElement("main");
     let height = 388;
-    element.getBoundingClientRect = () =>
-      ({
-        width: 420,
-        height,
-        top: 0,
-        left: 0,
-        right: 420,
-        bottom: height,
-        x: 0,
-        y: 0,
-        toJSON: () => ({}),
-      }) as DOMRect;
+    const applyHeight = () => mockShellHeight(element, height);
+    applyHeight();
 
     const cleanup = setupMainWindowFit(element);
     await flushWindowFit();
@@ -215,6 +189,7 @@ describe("setupMainWindowFit", () => {
     );
 
     height = 560;
+    applyHeight();
     mutationCallback?.([], {} as MutationObserver);
     await flushWindowFit();
 
@@ -225,35 +200,110 @@ describe("setupMainWindowFit", () => {
     cleanup();
   });
 
-  it("does not shrink the window when content collapses below the current height", async () => {
-    innerSizeMock.mockResolvedValue({ width: 420, height: 600 });
-
+  it("shrinks the window when expanded content collapses below the current height", async () => {
     const element = document.createElement("main");
-    let height = 600;
-    element.getBoundingClientRect = () =>
-      ({
-        width: 420,
-        height,
-        top: 0,
-        left: 0,
-        right: 420,
-        bottom: height,
-        x: 0,
-        y: 0,
-        toJSON: () => ({}),
-      }) as DOMRect;
+    let height = 388;
+    const applyHeight = () => mockShellHeight(element, height);
+    applyHeight();
 
     const cleanup = setupMainWindowFit(element);
     await flushWindowFit();
 
-    expect(setSizeMock).not.toHaveBeenCalled();
-
-    height = 300;
+    height = 560;
+    applyHeight();
     mutationCallback?.([], {} as MutationObserver);
     await flushWindowFit();
 
-    expect(setSizeMock).not.toHaveBeenCalled();
+    expect(setSizeMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ width: 420, height: 560 }),
+    );
+
+    height = 388;
+    applyHeight();
+    remeasureMainWindowFit(element, { forceContentShrink: true });
+    await flushWindowFit();
+
+    expect(setSizeMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ width: 420, height: 388 }),
+    );
 
     cleanup();
+  });
+
+  it("does not shrink the window after the user manually resizes taller", async () => {
+    const element = document.createElement("main");
+    let height = 388;
+    const applyHeight = () => mockShellHeight(element, height);
+    applyHeight();
+
+    const cleanup = setupMainWindowFit(element);
+    await flushWindowFit();
+
+    expect(setSizeMock).toHaveBeenCalledWith(
+      expect.objectContaining({ width: 420, height: 388 }),
+    );
+
+    innerSizeMock.mockResolvedValue({ width: 420, height: 520 });
+    globalThis.dispatchEvent(new Event("resize"));
+    await flushWindowFit();
+
+    expect(element.style.minHeight).toBe("520px");
+
+    height = 300;
+    applyHeight();
+    mutationCallback?.([], {} as MutationObserver);
+    await flushWindowFit();
+
+    expect(setSizeMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ height: 300 }),
+    );
+
+    cleanup();
+  });
+});
+
+describe("setupDialogWindowFit", () => {
+  beforeEach(() => {
+    setSizeMock.mockClear();
+    innerSizeMock.mockClear();
+    scaleFactorMock.mockClear();
+    innerSizeMock.mockResolvedValue({ width: 480, height: 640 });
+    scaleFactorMock.mockResolvedValue(1);
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe = vi.fn();
+        unobserve = vi.fn();
+        disconnect = vi.fn();
+        constructor(_callback: ResizeObserverCallback) {}
+      },
+    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("resizes the dialog window to the measured root height", async () => {
+    const root = document.createElement("main");
+    root.className = "dialogWindowRoot dialogWindowRootFitContent";
+    root.getBoundingClientRect = () =>
+      ({
+        height: 418,
+      }) as DOMRect;
+    const panel = document.createElement("section");
+    panel.className = "replyStylePanel detachedPanel";
+    root.append(panel);
+    document.body.append(root);
+
+    const cleanup = setupDialogWindowFit(panel);
+    await flushWindowFit();
+
+    expect(setSizeMock).toHaveBeenCalledWith(
+      expect.objectContaining({ width: 480, height: 418 }),
+    );
+
+    cleanup();
+    root.remove();
   });
 });
