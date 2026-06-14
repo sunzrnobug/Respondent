@@ -69,7 +69,7 @@ pub struct ReqwestChatTransport {
 impl Default for ReqwestChatTransport {
     fn default() -> Self {
         Self {
-            client: reqwest::blocking::Client::new(),
+            client: super::streaming::build_streaming_http_client(),
         }
     }
 }

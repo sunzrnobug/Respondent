@@ -1,5 +1,5 @@
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use serde_json::Value;
@@ -8,6 +8,25 @@ use super::client::{LlmError, ReplyEvent, ReplyGeneration, ReplyPoll, ReplyReque
 
 pub const GENERIC_FAILURE_TEXT: &str =
     "回复生成失败。请检查 API 密钥、模型或网络连接。";
+
+/// Abort the connect phase after this long.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+/// Total cap on a single reply generation. The blocking client enforces this
+/// across body reads too, so a stalled SSE stream is dropped instead of
+/// blocking the reply worker thread forever. Generous enough not to cut a
+/// healthy short-reply generation.
+const TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Blocking HTTP client for streaming (SSE) reply transports. Shares one
+/// timeout policy across every LLM dialect so a network stall can never wedge
+/// a worker thread or leak a connection until process exit.
+pub fn build_streaming_http_client() -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(TOTAL_TIMEOUT)
+        .build()
+        .unwrap_or_else(|_| reqwest::blocking::Client::new())
+}
 
 /// A stream of parsed SSE JSON values; `[DONE]` or EOF yields Ok(None).
 pub trait SseValueStream: Send {

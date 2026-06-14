@@ -1,0 +1,40 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#262b35"/>
+      <stop offset="1" stop-color="#0f1116"/>
+    </linearGradient>
+    <linearGradient id="bubble" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffe293"/>
+      <stop offset="1" stop-color="#ffc23d"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded-square app background -->
+  <rect x="0" y="0" width="1024" height="1024" rx="232" ry="232" fill="url(#bg)"/>
+
+  <!-- Speech bubble (reply) with a tail at the bottom-left -->
+  <path fill="url(#bubble)" d="
+    M 342 246
+    H 682
+    a 124 124 0 0 1 124 124
+    V 558
+    a 124 124 0 0 1 -124 124
+    H 470
+    l -118 118
+    v -118
+    h -10
+    a 124 124 0 0 1 -124 -124
+    V 370
+    a 124 124 0 0 1 124 -124
+    Z"/>
+
+  <!-- Sound-wave bars (listening / ASR) inside the bubble -->
+  <g fill="#15171d">
+    <rect x="370" y="389" width="46" height="150" rx="23"/>
+    <rect x="450" y="339" width="46" height="250" rx="23"/>
+    <rect x="530" y="299" width="46" height="330" rx="23"/>
+    <rect x="610" y="349" width="46" height="230" rx="23"/>
+    <rect x="690" y="384" width="46" height="160" rx="23"/>
+  </g>
+</svg>

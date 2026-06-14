@@ -25,6 +25,7 @@ pub fn run() {
             #[cfg(desktop)]
             {
                 window_visibility::init_global_shortcut_plugin(app.handle())?;
+                setup_tray(app.handle())?;
             }
 
             let db = commands::PersistentSessionDb::open(app.handle())
@@ -68,4 +69,46 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// System-tray icon: the app lives in the notification area instead of the
+/// taskbar. Left-click shows/focuses the window; the menu toggles visibility
+/// or quits.
+#[cfg(desktop)]
+fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+    let toggle_item = MenuItem::with_id(app, "toggle", "显示 / 隐藏窗口", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&toggle_item, &quit_item])?;
+
+    let mut builder = TrayIconBuilder::with_id("main-tray")
+        .tooltip("Respondent 会议助手")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "toggle" => {
+                let _ = window_visibility::toggle_visibility(app);
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                let _ = window_visibility::show_main_window(tray.app_handle());
+            }
+        });
+
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+
+    builder.build(app)?;
+    Ok(())
 }

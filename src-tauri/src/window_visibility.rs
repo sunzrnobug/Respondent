@@ -135,20 +135,26 @@ pub fn init_global_shortcut_plugin(_app: &tauri::AppHandle) -> Result<(), String
     Ok(())
 }
 
-#[tauri::command]
-pub fn toggle_main_window_visibility(app: tauri::AppHandle) -> Result<bool, String> {
+/// Toggle main-window visibility. Returns the new visibility (`true` = shown).
+/// Shared by the IPC command and the tray icon.
+pub fn toggle_visibility(app: &AppHandle) -> Result<bool, String> {
     let main = app
         .get_webview_window("main")
         .ok_or_else(|| "未找到主窗口".to_string())?;
     let visible = main.is_visible().map_err(|err| err.to_string())?;
 
     if visible {
-        hide_all_windows(&app)?;
+        hide_all_windows(app)?;
         #[cfg(desktop)]
-        schedule_enable_wake_shortcut(&app);
+        schedule_enable_wake_shortcut(app);
         Ok(false)
     } else {
-        show_main_window(&app)?;
+        show_main_window(app)?;
         Ok(true)
     }
+}
+
+#[tauri::command]
+pub fn toggle_main_window_visibility(app: tauri::AppHandle) -> Result<bool, String> {
+    toggle_visibility(&app)
 }

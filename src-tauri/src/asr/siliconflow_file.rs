@@ -37,11 +37,20 @@ fn truncate(text: &str) -> String {
 pub struct ReqwestTranscriptionTransport {
     client: reqwest::blocking::Client,
 }
+/// Bound the connect phase and the whole upload+transcription request. Without
+/// these a hung upload would block the ASR thread forever and freeze session
+/// teardown (`end_session` joins that thread).
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+const TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
 impl Default for ReqwestTranscriptionTransport {
     fn default() -> Self {
-        Self {
-            client: reqwest::blocking::Client::new(),
-        }
+        let client = reqwest::blocking::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(TOTAL_TIMEOUT)
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
+        Self { client }
     }
 }
 impl TranscriptionTransport for ReqwestTranscriptionTransport {
